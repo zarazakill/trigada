@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#2563eb">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💼</text></svg>">
+    <title>Brigade Manager Pro</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container" id="appContainer">
+        <header>
+            <h1>💼 Brigade Manager Pro</h1>
+            <div class="header-actions">
+                <button class="secondary sm" data-action="quick-stats">📊 Статистика</button>
+                <button class="secondary sm" data-action="toggle-theme">🌓 Тема</button>
+            </div>
+        </header>
+
+        <nav class="tabs" id="mainTabs" role="tablist" aria-label="Разделы">
+            <button class="tab active" data-tab="dashboard" role="tab" aria-selected="true">📊 Дашборд</button>
+            <button class="tab" data-tab="projects" role="tab" aria-selected="false">📁 Проекты</button>
+            <button class="tab" data-tab="workers" role="tab" aria-selected="false">👷 Работники</button>
+            <button class="tab" data-tab="expenses" role="tab" aria-selected="false">💸 Расходы</button>
+            <button class="tab" data-tab="timetracking" role="tab" aria-selected="false">⏱ Учет времени</button>
+            <button class="tab" data-tab="calendar" role="tab" aria-selected="false">📅 Календарь</button>
+            <button class="tab" data-tab="reports" role="tab" aria-selected="false">📈 Отчеты</button>
+            <button class="tab" data-tab="templates" role="tab" aria-selected="false">📋 Шаблоны</button>
+            <button class="tab" data-tab="settings" role="tab" aria-selected="false">⚙️ Настройки</button>
+        </nav>
+
+        <!-- ДАШБОРД -->
+        <section id="dashboard" class="tab-content active" role="tabpanel">
+            <h2>Обзор проекта</h2>
+            <div class="stats-grid" id="dashboardStats"></div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 25px;">
+                <div class="chart-container">
+                    <h3>Расходы по категориям</h3>
+                    <div id="categoryChart"></div>
+                </div>
+                <div class="chart-container">
+                    <h3>Топ проектов по расходам</h3>
+                    <div id="projectChart"></div>
+                </div>
+            </div>
+            <div class="chart-container" style="margin-top: 20px;">
+                <h3>Динамика расходов (последние 7 дней)</h3>
+                <div id="dailyChart"></div>
+            </div>
+        </section>
+
+        <!-- ПРОЕКТЫ -->
+        <section id="projects" class="tab-content" role="tabpanel">
+            <h2>Управление проектами</h2>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="projectName">Название проекта *</label>
+                    <input type="text" id="projectName" placeholder="Например: Ремонт офиса" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label for="projectBudget">Бюджет (руб)</label>
+                    <input type="number" id="projectBudget" placeholder="0" min="0" step="0.01">
+                </div>
+                <div class="form-group">
+                    <label for="projectCurrency">Валюта</label>
+                    <select id="projectCurrency">
+                        <option value="RUB">₽ Рубль</option>
+                        <option value="USD">$ Доллар</option>
+                        <option value="EUR">€ Евро</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="projectStatus">Статус</label>
+                    <select id="projectStatus">
+                        <option value="active">Активный</option>
+                        <option value="planning">Планирование</option>
+                        <option value="completed">Завершен</option>
+                        <option value="paused">Приостановлен</option>
+                    </select>
+                </div>
+                <div class="form-group" style="grid-column: 1 / -1;">
+                    <label for="projectDesc">Описание</label>
+                    <textarea id="projectDesc" rows="2" placeholder="Детали проекта..."></textarea>
+                </div>
+                <div style="grid-column: 1 / -1;">
+                    <button class="success" data-action="add-project">➕ Добавить проект</button>
+                </div>
+            </div>
+
+            <div class="search-filter-bar">
+                <div class="search-box">
+                    <input type="text" id="searchProjects" placeholder="Поиск проектов..." autocomplete="off" data-filter-input="projects">
+                </div>
+                <select id="filterProjectStatus" data-filter-input="projects">
+                    <option value="all">Все статусы</option>
+                    <option value="active">Активные</option>
+                    <option value="completed">Завершенные</option>
+                </select>
+                <select id="filterProjectView" data-filter-input="projects">
+                    <option value="active">Активные проекты</option>
+                    <option value="all">Все проекты</option>
+                    <option value="archived">Архив</option>
+                </select>
+            </div>
+
+            <div id="projectsList" class="cards-grid"></div>
+        </section>
+
+        <!-- РАБОТНИКИ -->
+        <section id="workers" class="tab-content" role="tabpanel">
+            <h2>Управление работниками</h2>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="workerName">ФИО *</label>
+                    <input type="text" id="workerName" placeholder="Иванов Иван Иванович" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label for="workerPhone">Телефон</label>
+                    <input type="tel" id="workerPhone" placeholder="+7 (999) 123-45-67">
+                </div>
+                <div class="form-group">
+                    <label for="workerPosition">Должность</label>
+                    <input type="text" id="workerPosition" placeholder="Электрик" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label for="workerRate">Ставка (руб/час)</label>
+                    <input type="number" id="workerRate" placeholder="500" min="0" step="0.01">
+                </div>
+                <div class="form-group">
+                    <label for="workerSchedule">График работы</label>
+                    <select id="workerSchedule">
+                        <option value="full">Полный день</option>
+                        <option value="part">Частичная занятость</option>
+                        <option value="project">По проекту</option>
+                    </select>
+                </div>
+                <div style="display: flex; align-items: flex-end;">
+                    <button class="success" data-action="add-worker">➕ Добавить работника</button>
+                </div>
+            </div>
+
+            <div class="search-filter-bar">
+                <div class="search-box">
+                    <input type="text" id="searchWorkers" placeholder="Поиск работников..." autocomplete="off" data-filter-input="workers">
+                </div>
+                <select id="filterWorkerView" data-filter-input="workers">
+                    <option value="active">Активные</option>
+                    <option value="all">Все</option>
+                    <option value="archived">Архив</option>
+                </select>
+            </div>
+
+            <div class="table-wrapper" id="workersList"></div>
+        </section>
+
+        <!-- РАСХОДЫ -->
+        <section id="expenses" class="tab-content" role="tabpanel">
+            <h2>Добавить операцию</h2>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="expenseProject">Проект *</label>
+                    <select id="expenseProject"></select>
+                </div>
+                <div class="form-group">
+                    <label for="expenseCategory">Категория *</label>
+                    <select id="expenseCategory">
+                        <option value="materials">🧱 Материалы</option>
+                        <option value="transport">🚗 Транспорт</option>
+                        <option value="tools">🔧 Инструменты</option>
+                        <option value="rent">🏠 Аренда</option>
+                        <option value="utilities">💡 Коммунальные</option>
+                        <option value="food">🍽 Еда</option>
+                        <option value="advance">💰 Аванс работнику</option>
+                        <option value="salary">💵 Зарплата</option>
+                        <option value="other">📦 Другое</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="expenseAmount">Сумма *</label>
+                    <input type="number" id="expenseAmount" placeholder="0" min="0" step="0.01">
+                </div>
+                <div class="form-group">
+                    <label for="expenseDate">Дата *</label>
+                    <input type="date" id="expenseDate">
+                </div>
+                <div class="form-group" style="grid-column: 1 / -1;">
+                    <label for="expenseDesc">Описание</label>
+                    <input type="text" id="expenseDesc" placeholder="Подробности расхода...">
+                </div>
+            </div>
+
+            <div class="form-group" style="margin-bottom: 20px;">
+                <label>Разбить сумму между работниками (необязательно)</label>
+                <div id="expenseWorkersSplit" class="split-container"></div>
+            </div>
+
+            <div style="display: flex; gap: 10px; margin-bottom: 30px; flex-wrap: wrap;">
+                <button class="success" data-action="add-expense">💾 Сохранить операцию</button>
+                <button class="secondary" data-action="load-template">📋 Загрузить шаблон</button>
+            </div>
+
+            <h3>История операций</h3>
+            <div class="search-filter-bar">
+                <div class="search-box">
+                    <input type="text" id="searchExpenses" placeholder="Поиск..." autocomplete="off" data-filter-input="expenses">
+                </div>
+                <select id="filterExpenseCategory" data-filter-input="expenses"></select>
+                <select id="filterExpenseProject" data-filter-input="expenses"></select>
+                <input type="date" id="filterExpenseFrom" data-filter-input="expenses" title="С даты">
+                <input type="date" id="filterExpenseTo" data-filter-input="expenses" title="По дату">
+                <select id="filterExpenseSort" data-filter-input="expenses">
+                    <option value="date-desc">Дата ↓</option>
+                    <option value="date-asc">Дата ↑</option>
+                    <option value="amount-desc">Сумма ↓</option>
+                    <option value="amount-asc">Сумма ↑</option>
+                    <option value="name-asc">Название ↑</option>
+                    <option value="name-desc">Название ↓</option>
+                </select>
+            </div>
+
+            <div class="table-wrapper" id="expensesList"></div>
+        </section>
+
+        <!-- УЧЕТ ВРЕМЕНИ -->
+        <section id="timetracking" class="tab-content" role="tabpanel">
+            <h2>Учет рабочего времени</h2>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="timeWorker">Работник *</label>
+                    <select id="timeWorker"></select>
+                </div>
+                <div class="form-group">
+                    <label for="timeProject">Проект *</label>
+                    <select id="timeProject"></select>
+                </div>
+                <div class="form-group">
+                    <label for="timeDate">Дата *</label>
+                    <input type="date" id="timeDate">
+                </div>
+                <div class="form-group">
+                    <label for="timeHours">Часов отработано</label>
+                    <input type="number" id="timeHours" placeholder="8" min="0" step="0.5">
+                </div>
+                <div class="form-group">
+                    <label for="timeType">Тип работы</label>
+                    <select id="timeType">
+                        <option value="regular">Обычная работа</option>
+                        <option value="overtime">Переработка</option>
+                        <option value="weekend">Выходной день</option>
+                    </select>
+                </div>
+                <div class="form-group" style="grid-column: 1 / -1;">
+                    <label for="timeComment">Комментарий</label>
+                    <input type="text" id="timeComment" placeholder="Что выполнялось...">
+                </div>
+                <div style="grid-column: 1 / -1;">
+                    <button class="success" data-action="add-time">⏱ Добавить запись</button>
+                </div>
+            </div>
+
+            <h3 style="margin-top: 30px;">Записи учета времени</h3>
+            <div class="table-wrapper" id="timeEntriesList"></div>
+        </section>
+
+        <!-- КАЛЕНДАРЬ -->
+        <section id="calendar" class="tab-content" role="tabpanel">
+            <h2>Календарь расходов</h2>
+            <div class="cal-nav">
+                <button class="sm" data-action="cal-prev">◀ Предыдущий</button>
+                <h3 id="calendarMonthYear"></h3>
+                <button class="sm" data-action="cal-next">Следующий ▶</button>
+            </div>
+            <div class="calendar" id="calendarGrid"></div>
+        </section>
+
+        <!-- ОТЧЕТЫ -->
+        <section id="reports" class="tab-content" role="tabpanel">
+            <h2>Аналитика и отчеты</h2>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="reportProject">Проект</label>
+                    <select id="reportProject" data-report-filter></select>
+                </div>
+                <div class="form-group">
+                    <label for="reportDateFrom">С даты</label>
+                    <input type="date" id="reportDateFrom" data-report-filter>
+                </div>
+                <div class="form-group">
+                    <label for="reportDateTo">По дату</label>
+                    <input type="date" id="reportDateTo" data-report-filter>
+                </div>
+                <div class="form-group">
+                    <label for="reportGroupBy">Группировка</label>
+                    <select id="reportGroupBy" data-report-filter>
+                        <option value="category">По категориям</option>
+                        <option value="worker">По работникам</option>
+                        <option value="project">По проектам</option>
+                        <option value="date">По датам</option>
+                    </select>
+                </div>
+                <div style="grid-column: 1 / -1; display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button data-action="report-refresh">🔄 Обновить</button>
+                    <button class="success" data-action="export-csv">📥 Экспорт CSV</button>
+                    <button class="info" data-action="print">🖨 Печать</button>
+                </div>
+            </div>
+            <div id="reportContent"></div>
+        </section>
+
+        <!-- ШАБЛОНЫ -->
+        <section id="templates" class="tab-content" role="tabpanel">
+            <h2>Шаблоны расходов</h2>
+            <p style="margin-bottom: 20px; color: var(--secondary);">Создавайте шаблоны для часто повторяющихся расходов</p>
+
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="templateName">Название шаблона</label>
+                    <input type="text" id="templateName" placeholder="Например: Ежедневная еда" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label for="templateCategory">Категория</label>
+                    <select id="templateCategory">
+                        <option value="food">Еда</option>
+                        <option value="transport">Транспорт</option>
+                        <option value="materials">Материалы</option>
+                        <option value="tools">Инструменты</option>
+                        <option value="other">Другое</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="templateAmount">Сумма (типичная)</label>
+                    <input type="number" id="templateAmount" placeholder="0" min="0" step="0.01">
+                </div>
+                <div class="form-group">
+                    <label for="templateProject">Проект по умолчанию</label>
+                    <select id="templateProject"></select>
+                </div>
+                <div class="form-group" style="grid-column: 1 / -1;">
+                    <label for="templateDesc">Описание</label>
+                    <input type="text" id="templateDesc" placeholder="Описание шаблона...">
+                </div>
+                <div style="grid-column: 1 / -1;">
+                    <button class="success" data-action="add-template">💾 Сохранить шаблон</button>
+                </div>
+            </div>
+
+            <h3 style="margin-top: 30px;">Сохраненные шаблоны</h3>
+            <div id="templatesList"></div>
+        </section>
+
+        <!-- НАСТРОЙКИ -->
+        <section id="settings" class="tab-content" role="tabpanel">
+            <h2>Настройки и данные</h2>
+
+            <div class="settings-block">
+                <h3>Управление данными</h3>
+                <div class="settings-row">
+                    <button data-action="export-json">📥 Экспорт JSON</button>
+                    <button data-action="pick-import">📤 Импорт JSON</button>
+                    <input type="file" id="importFile" accept=".json" hidden data-raw>
+                    <button class="info" data-action="export-backup">☁️ Резервная копия</button>
+                    <button class="info" data-action="pick-restore">↩️ Восстановить из копии</button>
+                    <input type="file" id="restoreFile" accept=".json" hidden data-raw>
+                    <button class="secondary" data-action="verify-backup">🔍 Проверить копию</button>
+                    <button class="danger" data-action="clear-all">⚠️ Очистить всё</button>
+                </div>
+            </div>
+
+            <div class="settings-block">
+                <h3>Настройки программы</h3>
+                <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));">
+                    <div class="form-group">
+                        <label for="setCurrency">Основная валюта</label>
+                        <select id="setCurrency" data-settings-input>
+                            <option value="RUB">₽ Рубль</option>
+                            <option value="USD">$ Доллар</option>
+                            <option value="EUR">€ Евро</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="setBudgetWarn">Предупреждение бюджета, %</label>
+                        <input type="number" id="setBudgetWarn" min="1" max="100" step="1" data-settings-input>
+                    </div>
+                    <div class="form-group">
+                        <label for="setMaxHours">Макс. часов в день</label>
+                        <input type="number" id="setMaxHours" min="1" max="168" step="1" data-settings-input>
+                    </div>
+                </div>
+                <label class="checkbox-row">
+                    <input type="checkbox" id="notifyBudgetOver" data-settings-input>
+                    <span>Уведомлять при превышении бюджета</span>
+                </label>
+                <label class="checkbox-row">
+                    <input type="checkbox" id="notifyLowBalance" data-settings-input>
+                    <span>Уведомлять о задолженностях работникам</span>
+                </label>
+            </div>
+
+            <div class="settings-block help">
+                <h3>💡 Справка</h3>
+                <ul>
+                    <li>Данные хранятся локально в браузере (LocalStorage)</li>
+                    <li>Для переноса используйте Экспорт/Импорт JSON</li>
+                    <li>CSV экспорт совместим с Excel</li>
+                    <li><b>Заработано</b> = часы × ставка (с коэффициентами)</li>
+                    <li><b>Выплачено</b> = только авансы и зарплаты работнику</li>
+                    <li><b>Долг</b> = заработано − выплачено</li>
+                    <li>Шаблоны ускоряют ввод повторяющихся расходов</li>
+                    <li>Учет времени автоматически рассчитывает зарплату</li>
+                </ul>
+            </div>
+        </section>
+    </div>
+
+    <!-- Модальное окно -->
+    <div class="modal-overlay" id="modalOverlay" data-action="modal-backdrop">
+        <div class="modal" id="modalContent" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+            <h2 id="modalTitle"></h2>
+            <div id="modalBody"></div>
+            <div class="modal-actions" id="modalActions"></div>
+        </div>
+    </div>
+
+    <!-- Уведомления -->
+    <div id="toast-container" aria-live="polite"></div>
+
+    <script type="module" src="app.js"></script>
+</body>
+</html>
