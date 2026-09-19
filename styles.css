@@ -72,6 +72,10 @@ h3 { font-size: 16px; color: var(--text); margin-bottom: 15px; }
 
 .header-actions { display: flex; gap: 10px; align-items: center; }
 
+.save-status { font-size: 12px; color: var(--success); white-space: nowrap; }
+.save-status.saving { color: var(--secondary); }
+.save-status.error { color: var(--danger); }
+
 .tabs {
     display: flex;
     gap: 8px;
@@ -297,6 +301,11 @@ tr:hover { background: rgba(37, 99, 235, 0.03); }
     background: var(--bg);
     padding: 20px;
     border-radius: var(--radius);
+}
+
+.charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 25px; }
+@media (max-width: 900px) {
+    .charts-row { grid-template-columns: 1fr; }
 }
 
 .chart-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
@@ -596,3 +605,44 @@ tr:hover { background: rgba(37, 99, 235, 0.03); }
     z-index: 100;
     margin-bottom: 8px;
 }
+
+/* ===== Phase 1 — Project planning, stages, tasks ===== */
+.stage-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    margin-bottom: 8px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+.stage-row.archived, .task-row.archived { opacity: .55; }
+.task-row {
+    padding: 8px;
+    margin-bottom: 8px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid transparent;
+    border-radius: 8px;
+}
+.task-row.overdue { border-left-color: var(--danger); }
+.task-check { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; font-weight: 500; }
+.task-check input[type="checkbox"] { width: 18px; height: 18px; margin-top: 1px; flex-shrink: 0; }
+.task-check .done { text-decoration: line-through; color: var(--secondary); }
+.badge.done, .done { text-decoration: line-through; }
+.overtask td { background: rgba(239, 68, 68, 0.06); }
+.text-danger { color: var(--danger); font-weight: bold; }
+
+.badge.st-active, .badge.tk-in_progress { background: #dbeafe; color: #1e40af; }
+.badge.st-done, .badge.tk-done { background: #dcfce7; color: #166534; }
+.badge.st-planning, .badge.tk-todo { background: #e2e8f0; color: #475569; }
+.badge.st-archived, .badge.tk-cancelled { background: #f1f5f9; color: #94a3b8; }
+.badge.pri-urgent, .badge.pri-high { background: #fee2e2; color: #b91c1c; }
+.badge.pri-low { background: #f1f5f9; color: #64748b; }
+
+[data-theme="dark"] .badge.st-active, [data-theme="dark"] .badge.tk-in_progress { background: #1e3a8a; color: #bfdbfe; }
+[data-theme="dark"] .badge.st-done, [data-theme="dark"] .badge.tk-done { background: #14532d; color: #bbf7d0; }
+[data-theme="dark"] .badge.st-planning, [data-theme="dark"] .badge.tk-todo { background: #334155; color: #cbd5e1; }
+[data-theme="dark"] .badge.st-archived, [data-theme="dark"] .badge.tk-cancelled { background: #1e293b; color: #94a3b8; }
+[data-theme="dark"] .badge.pri-urgent, [data-theme="dark"] .badge.pri-high { background: #7f1d1d; color: #fecaca; }

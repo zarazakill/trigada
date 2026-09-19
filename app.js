@@ -8,10 +8,17 @@
 // ---------------- 1. CONFIG ----------------
 const CONFIG = {
     STORAGE_KEY: 'brigadeProV2',
-    APP_VERSION: '2.1.0',
-    SCHEMA_VERSION: 3,
+    APP_VERSION: '2.2.0',
+    SCHEMA_VERSION: 4,
     DEFAULT_CURRENCY: 'RUB',
     PAYMENT_CATEGORIES: ['advance', 'salary'],
+    // Optional feature flags — disabling a flag removes the feature from UI without deleting code.
+    features: { stages: true, tasks: true, activityLog: true },
+    TASK_STATUSES: ['TODO', 'IN_PROGRESS', 'DONE', 'CANCELLED'],
+    TASK_PRIORITIES: ['LOW', 'NORMAL', 'HIGH', 'URGENT'],
+    STAGE_STATUSES: ['planning', 'active', 'done', 'archived'],
+    PROJECT_PRIORITIES: ['LOW', 'NORMAL', 'HIGH', 'URGENT'],
+    ACTIVITY_LOG_LIMIT: 500,
     RATE_MULTIPLIERS: { regular: 1, overtime: 1.5, weekend: 2 },
     MAX_MONEY: 1e12,
     MONEY_PRECISION: 2,
@@ -22,6 +29,7 @@ const CONFIG = {
         budgetWarningPercent: 80,
         maxHoursPerDay: 24
     },
+    CURRENCIES: ['RUB', 'USD', 'EUR'],
     CATEGORIES: {
         food: 'Еда', transport: 'Транспорт', materials: 'Материалы',
         tools: 'Инструменты', advance: 'Аванс работнику', salary: 'Зарплата',
@@ -106,11 +114,50 @@ const Utils = {
         return true;
     },
 
-    csvEscape(value) {
+csvEscape(value) {
         if (value === null || value === undefined) return '';
         const s = String(value);
-        if (/[";\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+if (/[";\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
         return s;
+    },
+
+    // App-wide single currency (single source of truth for money display).
+    currency() { return Store.settings().currency || CONFIG.DEFAULT_CURRENCY; },
+
+    // Distribute totalCents across `count` shares so the sum is EXACTLY totalCents.
+    // e.g. evenSplitCents(10000, 3) -> [3334, 3333, 3333]
+    evenSplitCents(totalCents, count) {
+        count = Math.max(1, Math.floor(Number(count) || 1));
+        const base = Math.floor(totalCents / count);
+        const rem = totalCents - base * count;
+        return Array.from({ length: count }, (_, i) => (i < rem ? base + 1 : base));
+    },
+
+    // Resolve per-worker splits (ruble values or null) into exact cent amounts
+    // that sum to totalCents. Returns { splitsCents } or { error }.
+    computeSplitsCents(workers, splitsRuble, totalCents) {
+        const fixed = {};
+        const fill = [];
+        let fixedSum = 0;
+        for (const wid of workers) {
+            const v = splitsRuble ? splitsRuble[wid] : null;
+            if (v != null && Number(v) > 0) {
+                const c = this.cents(v);
+                fixed[wid] = c;
+                fixedSum += c;
+            } else {
+                fill.push(wid);
+            }
+        }
+        if (fixedSum > totalCents) return { error: 'over' };
+        const remaining = totalCents - fixedSum;
+        if (fill.length) {
+            const even = this.evenSplitCents(remaining, fill.length);
+            fill.forEach((wid, i) => { fixed[wid] = even[i]; });
+        } else if (remaining !== 0) {
+            return { error: 'mismatch' };
+        }
+        return { splitsCents: fixed };
     }
 };
 
@@ -127,16 +174,22 @@ const Storage = {
     write(payload, immediate) {
         const write = () => {
             this._dirty = false;
-            try { localStorage.setItem(CONFIG.STORAGE_KEY, payload); }
-            catch (e) {
+            this._saveStatusTimer && clearTimeout(this._saveStatusTimer);
+            try {
+                localStorage.setItem(CONFIG.STORAGE_KEY, payload);
+                UI.saveStatus('ok');
+            } catch (e) {
                 AppLogger.error('Не удалось сохранить данные. Возможно, закончилось место в браузере.', e);
+                UI.saveStatus('error');
                 UI.toast('Не удалось сохранить данные (хранилище переполнено?)', 'error');
             }
         };
-        if (immediate) { if (this._timer) clearTimeout(this._timer); write(); return; }
+        if (immediate) { this._saveStatusTimer && clearTimeout(this._saveStatusTimer); UI.saveStatus('saving'); if (this._timer) clearTimeout(this._timer); write(); return; }
         // Debounced write: batch rapid CRUD into a single localStorage write
         if (this._timer) clearTimeout(this._timer);
         this._dirty = true;
+        this._saveStatusTimer && clearTimeout(this._saveStatusTimer);
+        UI.saveStatus('saving');
         this._timer = setTimeout(write, 250);
     },
 
@@ -200,8 +253,25 @@ const Migrations = {
         data.schemaVersion = 3;
         return data;
     },
+    // version 3 -> 4 : add planning entity collections (stages, tasks) and non-destructive
+    // project planning fields; activity/notifications log kept as backward-safe arrays.
+    v3(data) {
+        ['stages', 'tasks', 'activityLog', 'notifications'].forEach(col => {
+            if (!Array.isArray(data[col])) data[col] = [];
+        });
+        (data.projects || []).forEach(p => {
+            if (p && typeof p === 'object') {
+                if (p.startDate == null) p.startDate = '';
+                if (p.endDate == null) p.endDate = '';
+                if (p.priority == null) p.priority = 'NORMAL';
+                if (p.lead == null) p.lead = '';
+            }
+        });
+        data.schemaVersion = 4;
+        return data;
+    },
 
-    getSteps() { return [this.v0, this.v1, this.v2]; }
+    getSteps() { return [this.v0, this.v1, this.v2, this.v3]; }
 };
 
 // ---------------- 6. VALIDATION / NORMALIZATION ----------------
@@ -210,15 +280,16 @@ const Validation = {
         const data = {
             projects: [], workers: [], expenses: [],
             timeEntries: [], templates: [],
+            stages: [], tasks: [], activityLog: [], notifications: [],
             settings: { ...CONFIG.DEFAULT_SETTINGS }
         };
         if (!raw || typeof raw !== 'object') return data;
 
         data.settings = { ...CONFIG.DEFAULT_SETTINGS, ...(raw.settings || {}) };
         // settings numeric guards
-        data.settings.budgetWarningPercent = Utils.cents(Math.max(1, Math.min(100, Number(data.settings.budgetWarningPercent) || 80))) / 100;
+        data.settings.budgetWarningPercent = Math.max(1, Math.min(100, Number(data.settings.budgetWarningPercent) || 80));
         data.settings.maxHoursPerDay = Math.max(1, Math.min(168, Number(data.settings.maxHoursPerDay) || 24));
-        data.settings.currency = ['RUB', 'USD', 'EUR'].includes(data.settings.currency) ? data.settings.currency : 'RUB';
+        data.settings.currency = CONFIG.CURRENCIES.includes(data.settings.currency) ? data.settings.currency : 'RUB';
 
         const normItem = (item, def) => {
             if (!item || typeof item !== 'object') return null;
@@ -226,11 +297,15 @@ const Validation = {
         };
 
         (Array.isArray(raw.projects) ? raw.projects : []).forEach(p => {
-            const o = normItem(p, { id: Utils.genId(), name: '', budget: 0, currency: 'RUB', status: 'active', desc: '', active: true, createdAt: null, updatedAt: null });
+            const o = normItem(p, { id: Utils.genId(), name: '', budget: 0, currency: 'RUB', status: 'active', desc: '', startDate: '', endDate: '', priority: 'NORMAL', lead: '', active: true, createdAt: null, updatedAt: null });
             if (!o) return;
             if (typeof o.name !== 'string') o.name = String(o.name ?? '');
             o.budget = Number.isFinite(Number(o.budget)) ? Utils.cents(o.budget) / 100 : 0;
             if (!CONFIG.PROJECT_STATUSES.includes(o.status)) o.status = 'active';
+            if (!Utils.validateDate(o.startDate)) o.startDate = '';
+            if (!Utils.validateDate(o.endDate)) o.endDate = '';
+            if (!CONFIG.PROJECT_PRIORITIES.includes(o.priority)) o.priority = 'NORMAL';
+            if (o.lead == null) o.lead = '';
             data.projects.push(o);
         });
 
@@ -275,23 +350,141 @@ const Validation = {
             data.templates.push(o);
         });
 
+        (Array.isArray(raw.stages) ? raw.stages : []).forEach(s => {
+            const o = normItem(s, { id: Utils.genId(), projectId: '', name: '', description: '', status: 'planning', startDate: '', endDate: '', order: 0 });
+            if (!o) return;
+            o.projectId = o.projectId == null ? '' : String(o.projectId);
+            if (typeof o.name !== 'string') o.name = String(o.name ?? '');
+            if (!CONFIG.STAGE_STATUSES.includes(o.status)) o.status = 'planning';
+            if (typeof o.description !== 'string') o.description = '';
+            if (!Utils.validateDate(o.startDate)) o.startDate = '';
+            if (!Utils.validateDate(o.endDate)) o.endDate = '';
+            o.order = Number.isFinite(Number(o.order)) ? Number(o.order) : 0;
+            data.stages.push(o);
+        });
+
+        (Array.isArray(raw.tasks) ? raw.tasks : []).forEach(t => {
+            const o = normItem(t, { id: Utils.genId(), projectId: '', stageId: '', title: '', description: '', status: 'TODO', priority: 'NORMAL', workerIds: [], startDate: '', dueDate: '', completedAt: null, createdAt: null, updatedAt: null });
+            if (!o) return;
+            o.projectId = o.projectId == null ? '' : String(o.projectId);
+            o.stageId = o.stageId == null ? '' : String(o.stageId);
+            if (typeof o.title !== 'string') o.title = String(o.title ?? '');
+            if (typeof o.description !== 'string') o.description = '';
+            if (!CONFIG.TASK_STATUSES.includes(o.status)) o.status = 'TODO';
+            if (!CONFIG.TASK_PRIORITIES.includes(o.priority)) o.priority = 'NORMAL';
+            if (!Utils.validateDate(o.startDate)) o.startDate = '';
+            if (!Utils.validateDate(o.dueDate)) o.dueDate = '';
+            o.workerIds = Array.isArray(o.workerIds) ? o.workerIds.filter(Boolean).map(String) : [];
+            data.tasks.push(o);
+        });
+
+        (Array.isArray(raw.activityLog) ? raw.activityLog : []).forEach(l => {
+            if (!l || typeof l !== 'object') return;
+            const o = {
+                id: String(l.id ?? Utils.genId()),
+                ts: Number(l.ts) || Date.now(),
+                entity: String(l.entity ?? ''),
+                action: String(l.action ?? ''),
+                label: String(l.label ?? '')
+            };
+            data.activityLog.push(o);
+        });
+        data.activityLog = data.activityLog.slice(-CONFIG.ACTIVITY_LOG_LIMIT);
+
         return data;
     },
 
-    // Integrity check: returns array of warnings; never throws
-    audit() {
+// Integrity check: returns array of warnings; never throws.
+    // Explicitly takes the object to audit — no hidden access to global Store.
+    audit(data) {
+        const d = data || Store.data;
         const problems = [];
-        const projIds = new Set(Store.data.projects.map(p => String(p.id)));
-        const workerIds = new Set(Store.data.workers.map(w => String(w.id)));
+        if (!d || typeof d !== 'object') return ['Данные отсутствуют или повреждены'];
 
-        Store.data.expenses.forEach((e, i) => {
-            if (!projIds.has(String(e.projectId))) problems.push(`Расход #${i + 1} ссылается на отсутствующий проект`);
-            (e.workers || []).forEach(w => { if (!workerIds.has(String(w))) problems.push(`Расход #${i + 1} ссылается на отсутствующего работника`); });
+        const projIds = new Set();
+        const workerIds = new Set();
+        const seenIds = new Set();
+
+        (Array.isArray(d.projects) ? d.projects : []).forEach((p, i) => {
+            if (!p || typeof p !== 'object') { problems.push(`Проект #${i + 1} повреждён`); return; }
+            const id = String(p.id);
+            if (!id) problems.push(`Проект #${i + 1}: отсутствует id`);
+            else if (seenIds.has('p:' + id)) problems.push(`Проект #${i + 1}: дублирующийся id`);
+            else { seenIds.add('p:' + id); projIds.add(id); }
+            if (typeof p.name !== 'string' || !p.name) problems.push(`Проект #${i + 1}: отсутствует название`);
+            if (!Number.isFinite(Number(p.budget)) || Number(p.budget) < 0) problems.push(`Проект #${i + 1}: некорректный бюджет`);
         });
-        Store.data.timeEntries.forEach((t, i) => {
+
+        (Array.isArray(d.workers) ? d.workers : []).forEach((w, i) => {
+            if (!w || typeof w !== 'object') { problems.push(`Работник #${i + 1} повреждён`); return; }
+            const id = String(w.id);
+            if (!id) problems.push(`Работник #${i + 1}: отсутствует id`);
+            else if (seenIds.has('w:' + id)) problems.push(`Работник #${i + 1}: дублирующийся id`);
+            else { seenIds.add('w:' + id); workerIds.add(id); }
+            if (typeof w.name !== 'string' || !w.name) problems.push(`Работник #${i + 1}: отсутствует имя`);
+            if (!Number.isFinite(Number(w.rate)) || Number(w.rate) < 0) problems.push(`Работник #${i + 1}: некорректная ставка`);
+        });
+
+        (Array.isArray(d.expenses) ? d.expenses : []).forEach((e, i) => {
+            if (!e || typeof e !== 'object') { problems.push(`Расход #${i + 1} повреждён`); return; }
+            if (!projIds.has(String(e.projectId))) problems.push(`Расход #${i + 1} ссылается на отсутствующий проект`);
+            if (!Number.isFinite(Number(e.amount)) || Number(e.amount) < 0) problems.push(`Расход #${i + 1}: некорректная сумма`);
+            if (!Utils.validateDate(e.date)) problems.push(`Расход #${i + 1}: некорректная дата`);
+            const wlist = Array.isArray(e.workers) ? e.workers.map(String) : [];
+            wlist.forEach(w => { if (!workerIds.has(String(w))) problems.push(`Расход #${i + 1} ссылается на отсутствующего работника`); });
+            // splits must reference only participating workers and sum exactly to amount
+            if (e.splits && typeof e.splits === 'object') {
+                const splitKeys = Object.keys(e.splits);
+                splitKeys.forEach(k => {
+                    if (!wlist.includes(String(k))) problems.push(`Расход #${i + 1}: доля для работника, не участвующего в расходе`);
+                });
+                const sumCents = splitKeys.reduce((s, k) => s + Utils.cents(e.splits[k]), 0);
+                if (wlist.length && Math.abs(sumCents - Utils.cents(e.amount)) > 0) {
+                    problems.push(`Расход #${i + 1}: сумма долей (${sumCents} коп.) не равна сумме расхода (${Utils.cents(e.amount)} коп.)`);
+                }
+            }
+        });
+
+        (Array.isArray(d.timeEntries) ? d.timeEntries : []).forEach((t, i) => {
+            if (!t || typeof t !== 'object') { problems.push(`Запись времени #${i + 1} повреждена`); return; }
             if (!workerIds.has(String(t.workerId))) problems.push(`Запись времени #${i + 1} ссылается на отсутствующего работника`);
             if (!projIds.has(String(t.projectId))) problems.push(`Запись времени #${i + 1} ссылается на отсутствующий проект`);
+            const h = Number(t.hours);
+            if (!Number.isFinite(h) || h <= 0 || h > (d.settings && d.settings.maxHoursPerDay) || h > 168) {
+                problems.push(`Запись времени #${i + 1}: некорректное количество часов`);
+            }
+            if (!Utils.validateDate(t.date)) problems.push(`Запись времени #${i + 1}: некорректная дата`);
         });
+
+        (Array.isArray(d.stages) ? d.stages : []).forEach((s, i) => {
+            if (!s || typeof s !== 'object') { problems.push(`Этап #${i + 1} повреждён`); return; }
+            if (!String(s.id)) problems.push(`Этап #${i + 1}: отсутствует id`);
+            else if (seenIds.has('s:' + s.id)) problems.push(`Этап #${i + 1}: дублирующийся id`);
+            else seenIds.add('s:' + s.id);
+            if (typeof s.name !== 'string' || !s.name) problems.push(`Этап #${i + 1}: отсутствует название`);
+            if (!projIds.has(String(s.projectId))) problems.push(`Этап #${i + 1} ссылается на отсутствующий проект`);
+        });
+
+        const stageOwners = new Map();
+        (Array.isArray(d.tasks) ? d.tasks : []).forEach((t, i) => {
+            if (!t || typeof t !== 'object') { problems.push(`Задача #${i + 1} повреждена`); return; }
+            if (!String(t.id)) problems.push(`Задача #${i + 1}: отсутствует id`);
+            else if (seenIds.has('t:' + t.id)) problems.push(`Задача #${i + 1}: дублирующийся id`);
+            else seenIds.add('t:' + t.id);
+            if (typeof t.title !== 'string' || !t.title) problems.push(`Задача #${i + 1}: отсутствует название`);
+            if (!projIds.has(String(t.projectId))) problems.push(`Задача #${i + 1} ссылается на отсутствующий проект`);
+            if (t.stageId) {
+                const owns = stageOwners.get(String(t.stageId));
+                if (owns !== undefined && owns !== String(t.projectId)) problems.push(`Задача #${i + 1}: этап принадлежит другому проекту`);
+                stageOwners.set(String(t.stageId), String(t.projectId));
+                if (!(d.stages || []).some(s => String(s.id) === String(t.stageId))) problems.push(`Задача #${i + 1} ссылается на отсутствующий этап`);
+            }
+            (Array.isArray(t.workerIds) ? t.workerIds : []).forEach(w => { if (!workerIds.has(String(w))) problems.push(`Задача #${i + 1} ссылается на отсутствующего работника`); });
+            if (t.dueDate && (t.status === 'TODO' || t.status === 'IN_PROGRESS') && Utils.validateDate(t.dueDate) && t.dueDate < Utils.todayStr()) {
+                problems.push(`Задача #${i + 1}: просрочена (${t.dueDate})`);
+            }
+        });
+
         return problems;
     }
 };
@@ -317,6 +510,7 @@ const Store = {
         try {
             // migrate
             let version = Number(parsed.schemaVersion) || 0;
+            if (version > CONFIG.SCHEMA_VERSION) throw new Error('newer schema version: ' + version);
             const steps = Migrations.getSteps();
             for (let i = version; i <= CONFIG.SCHEMA_VERSION && i < steps.length; i++) {
                 parsed = steps[i](parsed);
@@ -474,6 +668,99 @@ const Store = {
     deleteTemplate(id) {
         this.data.templates = this.data.templates.filter(x => !Utils.eq(x.id, id));
         this.save();
+    },
+
+    // --- Activity log (bounded, local only) ---
+    log(entity, action, label) {
+        if (!CONFIG.features.activityLog) return;
+        this.data.activityLog.push({ id: Utils.genId(), ts: Date.now(), entity, action, label: String(label ?? '') });
+        if (this.data.activityLog.length > CONFIG.ACTIVITY_LOG_LIMIT) this.data.activityLog = this.data.activityLog.slice(-CONFIG.ACTIVITY_LOG_LIMIT);
+        this.save();
+    },
+
+    // --- Stages ---
+    addStage(o) {
+        const now = new Date().toISOString();
+        const order = this.data.stages.filter(s => Utils.eq(s.projectId, o.projectId)).length;
+        const s = { ...o, status: CONFIG.STAGE_STATUSES.includes(o.status) ? o.status : 'planning', order, createdAt: now, updatedAt: now, id: Utils.genId() };
+        this.data.stages.push(s);
+        this.log('stage', 'create', `Этап «${s.name}»`);
+        this.save();
+        return s;
+    },
+    updateStage(id, u) {
+        const s = this.data.stages.find(x => Utils.eq(x.id, id));
+        if (!s) return null;
+        Object.assign(s, u, { updatedAt: new Date().toISOString() });
+        this.log('stage', 'update', `Этап «${s.name}»`);
+        this.save();
+        return s;
+    },
+    moveStage(id, dir) {
+        const s = this.data.stages.find(x => Utils.eq(x.id, id));
+        if (!s) return;
+        const list = this.data.stages.filter(x => Utils.eq(x.projectId, s.projectId)).sort((a, b) => a.order - b.order);
+        const idx = list.findIndex(x => Utils.eq(x.id, id));
+        const swap = idx + dir;
+        if (swap < 0 || swap >= list.length) return;
+        [list[idx], list[swap]] = [list[swap], list[idx]];
+        list.forEach((x, i) => x.order = i);
+        this.save();
+    },
+    setStageStatus(id, status) {
+        const s = this.data.stages.find(x => Utils.eq(x.id, id));
+        if (!s || !CONFIG.STAGE_STATUSES.includes(status)) return;
+        s.status = status;
+        s.updatedAt = new Date().toISOString();
+        this.log('stage', 'status', `Этап «${s.name}» → ${status}`);
+        this.save();
+    },
+    archiveStage(id) {
+        const s = this.data.stages.find(x => Utils.eq(x.id, id));
+        if (!s) return;
+        s.status = 'archived';
+        s.updatedAt = new Date().toISOString();
+        this.log('stage', 'archive', `Этап «${s.name}»`);
+        this.save();
+    },
+    stagesOfProject(pid) {
+        return this.data.stages.filter(s => Utils.eq(s.projectId, pid)).sort((a, b) => a.order - b.order);
+    },
+
+    // --- Tasks ---
+    addTask(o) {
+        const now = new Date().toISOString();
+        const t = { ...o, status: CONFIG.TASK_STATUSES.includes(o.status) ? o.status : 'TODO', priority: CONFIG.TASK_PRIORITIES.includes(o.priority) ? o.priority : 'NORMAL', createdAt: now, updatedAt: now, id: Utils.genId() };
+        this.data.tasks.push(t);
+        this.log('task', 'create', `Задача «${t.title}»`);
+        this.save();
+        return t;
+    },
+    updateTask(id, u) {
+        const t = this.data.tasks.find(x => Utils.eq(x.id, id));
+        if (!t) return null;
+        Object.assign(t, u, { updatedAt: new Date().toISOString() });
+        this.log('task', 'update', `Задача «${t.title}»`);
+        this.save();
+        return t;
+    },
+    setTaskStatus(id, status) {
+        const t = this.data.tasks.find(x => Utils.eq(x.id, id));
+        if (!t || !CONFIG.TASK_STATUSES.includes(status)) return;
+        t.status = status;
+        t.completedAt = status === 'DONE' ? new Date().toISOString() : null;
+        t.updatedAt = new Date().toISOString();
+        this.log('task', 'status', `Задача «${t.title}» → ${status}`);
+        this.save();
+    },
+    deleteTask(id) {
+        const t = this.data.tasks.find(x => Utils.eq(x.id, id));
+        this.data.tasks = this.data.tasks.filter(x => !Utils.eq(x.id, id));
+        if (t) this.log('task', 'delete', `Задача «${t.title}»`);
+        this.save();
+    },
+    tasksOfProject(pid) {
+        return this.data.tasks.filter(t => Utils.eq(t.projectId, pid));
     }
 };
 
@@ -496,10 +783,13 @@ const Calc = {
     // share of an expense belonging to a worker (cents)
     expenseWorkerShareCents(e, wid) {
         if (e.splits && e.splits[wid] != null) return Utils.cents(e.splits[wid]);
-        const w = e.workers && e.workers.length ? e.workers : [];
+        const w = Array.isArray(e.workers) ? e.workers.map(String) : [];
         if (w.length === 0) return 0;
-        if (w.length === 1) return Utils.cents(e.amount);
-        return Utils.cents(e.amount / w.length);
+        const total = Utils.cents(e.amount);
+        if (w.length === 1) return total;
+        const parts = Utils.evenSplitCents(total, w.length);
+        const idx = w.indexOf(String(wid));
+        return idx === -1 ? 0 : parts[idx];
     },
 
     workerEarnedCents(wid) {
@@ -526,6 +816,27 @@ const Calc = {
         return s;
     },
 
+    // Labour cost = sum of time-cost for time entries on this project (cents).
+    projectLaborCostCents(pid) {
+        let s = 0;
+        for (const t of Store.data.timeEntries) if (Utils.eq(t.projectId, pid)) s += this.timeCostCents(t);
+        return s;
+    },
+
+    // Direct expenses = expenses that are NOT salaries/advances to workers.
+    projectDirectExpenseCents(pid) {
+        let s = 0;
+        for (const e of Store.data.expenses) {
+            if (Utils.eq(e.projectId, pid) && !CONFIG.PAYMENT_CATEGORIES.includes(e.category)) s += Utils.cents(e.amount);
+        }
+        return s;
+    },
+
+    // totalCost = directExpenses + laborCost (payroll advances/salaries excluded to avoid double count)
+    projectTotalCostCents(pid) {
+        return this.projectDirectExpenseCents(pid) + this.projectLaborCostCents(pid);
+    },
+
     // split of project expenses by category (cents)
     projectCategoryCents(pid) {
         const out = {};
@@ -541,7 +852,29 @@ const Calc = {
         const ids = new Set();
         for (const e of Store.data.expenses) if (Utils.eq(e.projectId, pid)) (e.workers || []).forEach(w => ids.add(String(w)));
         for (const t of Store.data.timeEntries) if (Utils.eq(t.projectId, pid)) ids.add(String(t.workerId));
+        for (const task of Store.data.tasks) if (Utils.eq(task.projectId, pid)) (task.workerIds || []).forEach(w => ids.add(String(w)));
         return [...ids];
+    },
+
+    // Enriched worker assignment for a project: hours, earned, open task counts.
+    projectWorkersDetailed(pid) {
+        const hours = {};
+        const earned = {};
+        for (const t of Store.data.timeEntries) {
+            if (!Utils.eq(t.projectId, pid)) continue;
+            hours[t.workerId] = (hours[t.workerId] || 0) + (Number(t.hours) || 0);
+            earned[t.workerId] = (earned[t.workerId] || 0) + this.timeCostCents(t);
+        }
+        const taskCount = {};
+        for (const task of Store.data.tasks) {
+            if (!Utils.eq(task.projectId, pid)) continue;
+            if (task.status === 'DONE' || task.status === 'CANCELLED') continue;
+            (task.workerIds || []).forEach(w => taskCount[w] = (taskCount[w] || 0) + 1);
+        }
+        return this.projectWorkers(pid).map(wid => {
+            const w = Store.getWorker(wid);
+            return { id: wid, name: w ? w.name : '?', active: w ? w.active : false, hours: hours[wid] || 0, earnedCents: earned[wid] || 0, openTasks: taskCount[wid] || 0 };
+        }).filter(x => x.name !== '?' || x.hours || x.openTasks);
     },
 
     projectHours(pid) {
@@ -563,7 +896,16 @@ const Calc = {
             over: budget > 0 && spent > budget,
             warn: budget > 0 && !(spent > budget) && pct >= Store.settings().budgetWarningPercent
         };
-    }
+    },
+
+    // A task is overdue when it is still open and its due date has passed.
+    taskOverdue(t) {
+        if (!t || !t.dueDate) return false;
+        if (t.status === 'DONE' || t.status === 'CANCELLED') return false;
+        return Utils.validateDate(t.dueDate) && t.dueDate < Utils.todayStr();
+    },
+    overdueTasksCount() { return Store.data.tasks.filter(t => this.taskOverdue(t)).length; },
+    openTasksCount() { return Store.data.tasks.filter(t => t.status !== 'DONE' && t.status !== 'CANCELLED').length; }
 };
 
 // ---------------- 9. SERVICES (reports) ----------------
@@ -640,6 +982,22 @@ const UI = {
         setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 350); }, 3200);
     },
 
+    saveStatus(state) {
+        const el = document.getElementById('saveStatus');
+        if (!el) return;
+        if (state === 'error') {
+            el.textContent = '⚠ Не удалось сохранить';
+            el.className = 'save-status error';
+            setTimeout(() => { if (el.className.includes('error')) { el.textContent = '✓ Сохранено'; el.className = 'save-status'; } }, 5000);
+        } else if (state === 'saving') {
+            el.textContent = '● Сохранение...';
+            el.className = 'save-status saving';
+        } else {
+            el.textContent = '✓ Сохранено';
+            el.className = 'save-status';
+        }
+    },
+
     openModal(title, bodyHtml, actionsHtml) {
         const ov = document.getElementById('modalOverlay');
         document.getElementById('modalTitle').textContent = title;
@@ -690,12 +1048,15 @@ const Render = {
             totalHours += Calc.workerHours(w.id);
         });
 
-        const debtRub = Utils.toRub(totalDebtCents);
+        const debtLabel = totalDebtCents < 0
+            ? 'Переплата: ' + Utils.formatMoneyCents(Math.abs(totalDebtCents), cur)
+            : Utils.formatMoneyCents(totalDebtCents, cur);
+        const debtClass = totalDebtCents > 0 ? 'danger' : (totalDebtCents < 0 ? 'success' : 'flat');
         document.getElementById('dashboardStats').innerHTML =
             `<div class="stat-card"><h4>Всего расходов</h4><div class="value">${Utils.formatMoneyCents(totalSpent, cur)}</div></div>` +
             `<div class="stat-card secondary"><h4>Активных проектов</h4><div class="value">${activeProj}</div></div>` +
             `<div class="stat-card success"><h4>Работников</h4><div class="value">${totalWorkers}</div></div>` +
-            `<div class="stat-card ${debtRub > 0 ? 'danger' : 'flat'}"><h4>Долг по зарплате</h4><div class="value">${Utils.formatMoneyCents(totalDebtCents, cur)}</div></div>` +
+            `<div class="stat-card ${debtClass}"><h4>Долг по зарплате</h4><div class="value">${Utils.escapeHtml(debtLabel)}</div></div>` +
             `<div class="stat-card flat"><h4>Часов отработано</h4><div class="value">${totalHours.toLocaleString('ru-RU')}</div></div>`;
 
         // Category chart
@@ -770,6 +1131,11 @@ const Render = {
             const catsCents = Calc.projectCategoryCents(p.id);
             const wcount = Calc.projectWorkers(p.id).length;
             const hours = Calc.projectHours(p.id);
+            const stageCount = Store.stagesOfProject(p.id).filter(s => s.status !== 'archived').length;
+            const openTasks = Store.data.tasks.filter(t => Utils.eq(t.projectId, p.id) && t.status !== 'DONE' && t.status !== 'CANCELLED').length;
+            const planLine = (p.startDate || p.endDate) ? ` · ${p.startDate ? 'с ' + Utils.formatDate(p.startDate) : ''}${p.endDate ? ' по ' + Utils.formatDate(p.endDate) : ''}` : '';
+            const leadHtml = p.lead ? ` · Ответств: ${Utils.escapeHtml(p.lead)}` : '';
+            const priBadge = p.priority && p.priority !== 'NORMAL' ? ` <span class="badge pri-${String(p.priority).toLowerCase()}">${p.priority}</span>` : '';
             return `<div class="card ${p.active ? '' : 'archived'}">
                 <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
                     <h3 style="margin:0;">${Utils.escapeHtml(p.name)}</h3>
@@ -777,10 +1143,11 @@ const Render = {
                 </div>
                 ${p.desc ? `<p style="color:var(--secondary); font-size:13px; margin:5px 0;">${Utils.escapeHtml(p.desc)}</p>` : ''}
                 <div style="margin-top:10px; font-size:14px;">
-                    <div>Бюджет: <b>${Utils.formatMoneyCents(st.budget, p.currency)}</b></div>
-                    <div>Потрачено: <b style="color:${st.over ? 'var(--danger)' : 'var(--text)'}">${Utils.formatMoneyCents(st.spent, p.currency)}</b></div>
-                    <div>Остаток: <b style="color:${st.remaining < 0 ? 'var(--danger)' : 'var(--success)'}">${Utils.formatMoneyCents(st.remaining, p.currency)}</b></div>
-                    <div style="color:var(--secondary); font-size:12px; margin-top:4px;">Использовано: ${pct.toFixed(1)}% · Работников: ${wcount} · Часов: ${hours}</div>
+                    <div>Бюджет: <b>${Utils.formatMoneyCents(st.budget, cur)}</b></div>
+                    <div>Потрачено: <b style="color:${st.over ? 'var(--danger)' : 'var(--text)'}">${Utils.formatMoneyCents(st.spent, cur)}</b></div>
+                    <div>Остаток: <b style="color:${st.remaining < 0 ? 'var(--danger)' : 'var(--success)'}">${Utils.formatMoneyCents(st.remaining, cur)}</b></div>
+                    <div style="color:var(--secondary); font-size:12px; margin-top:4px;">Использовано: ${pct.toFixed(1)}% · Работников: ${wcount} · Часов: ${hours}<br>Этапов: ${stageCount} · Открытых задач: ${openTasks}${planLine}${leadHtml}</div>
+                    ${priBadge}
                 </div>
                 <div class="progress-bar"><div class="progress-fill ${fillClass}" style="width:${Math.min(pct, 100)}%"></div></div>
                 ${warnHtml}
@@ -815,11 +1182,13 @@ const Render = {
                 return `<tr class="${w.active ? '' : 'archived-row'}">
                     <td><b>${Utils.escapeHtml(w.name)}</b><br><small style="color:var(--secondary)">${Utils.escapeHtml(w.phone || '')}${w.active ? '' : ' · в архиве'}</small></td>
                     <td>${Utils.escapeHtml(w.position || '-')}</td>
-                    <td>${w.rate ? w.rate + ' ₽/ч' : '-'}</td>
+                    <td>${w.rate ? Utils.formatMoney(w.rate, cur) + '/ч' : '-'}</td>
                     <td>${hours}</td>
                     <td>${Utils.formatMoney(earned, cur)}</td>
                     <td>${Utils.formatMoney(paid, cur)}</td>
-                    <td style="color:${debt > 0 ? 'var(--danger)' : debt < 0 ? 'var(--success)' : 'inherit'}; font-weight:bold;">${Utils.formatMoney(debt, cur)}</td>
+                    <td style="color:${debt > 0 ? 'var(--danger)' : debt < 0 ? 'var(--success)' : 'inherit'}; font-weight:bold;">
+                        ${debt < 0 ? 'Переплата: ' + Utils.formatMoney(Math.abs(debt), cur) : Utils.formatMoney(debt, cur)}
+                    </td>
                     <td>
                         <button class="sm secondary" data-edit-worker="${Utils.escapeHtml(w.id)}">✏️</button>
                         <button class="sm info" data-detail-worker="${Utils.escapeHtml(w.id)}">👁</button>
@@ -972,6 +1341,53 @@ const Render = {
 
     reports() {
         generateReport();
+    },
+
+    tasks() {
+        if (!CONFIG.features.tasks) return;
+        updateTaskFilters();
+        const projF = document.getElementById('taskFilterProject').value;
+        const statusF = document.getElementById('taskFilterStatus').value;
+        const priF = document.getElementById('taskFilterPriority').value;
+        const onlyOverdue = document.getElementById('taskFilterOverdue').checked;
+        const cur = Store.settings().currency;
+        let list = Store.data.tasks.slice().sort((a, b) => {
+            const pr = { URGENT: 0, HIGH: 1, NORMAL: 2, LOW: 3 };
+            const pa = pr[a.priority] || 9, pb = pr[b.priority] || 9;
+            if (pa !== pb) return pa - pb;
+            return (a.dueDate || '9999') < (b.dueDate || '9999') ? -1 : 1;
+        });
+        if (projF !== 'all') list = list.filter(t => Utils.eq(t.projectId, projF));
+        if (statusF !== 'all') list = list.filter(t => t.status === statusF);
+        if (priF !== 'all') list = list.filter(t => t.priority === priF);
+        if (onlyOverdue) list = list.filter(t => Calc.taskOverdue(t));
+        const rows = list.map(t => {
+            const p = Store.getProject(t.projectId);
+            const stage = t.stageId ? (Store.data.stages.find(x => Utils.eq(x.id, t.stageId)) || {}).name : '';
+            const wnames = (t.workerIds || []).map(wid => { const w = Store.getWorker(wid); return w ? w.name : '?'; }).join(', ');
+            const overdue = Calc.taskOverdue(t);
+            const priBadge = t.priority !== 'NORMAL' ? `<span class="badge pri-${String(t.priority).toLowerCase()}">${t.priority}</span>` : '';
+            return `<tr class="${overdue ? 'overtask' : ''}">
+                <td><label class="task-check"><input type="checkbox" data-task-toggle="${t.id}" ${t.status === 'DONE' ? 'checked' : ''} ${t.status === 'CANCELLED' ? 'disabled' : ''}></label></td>
+                <td><b class="${t.status === 'DONE' ? 'done' : ''}">${Utils.escapeHtml(t.title)}</b> ${overdue ? '<span class="badge pri-urgent">ПРОСРОЧЕНО</span>' : ''}</td>
+                <td>${p ? Utils.escapeHtml(p.name) : '?'}</td>
+                <td>${Utils.escapeHtml(stage || '—')}</td>
+                <td><span class="badge tk-${t.status.toLowerCase()}">${t.status}</span> ${priBadge}</td>
+                <td>${Utils.escapeHtml(wnames || '—')}</td>
+                <td>${t.dueDate ? `<span class="${overdue ? 'text-danger' : ''}">${Utils.formatDate(t.dueDate)}</span>` : '—'}</td>
+                <td>
+                    <button class="sm primary" data-task-status="${t.id}" data-st="IN_PROGRESS">▶</button>
+                    <button class="sm secondary" data-task-edit="${t.id}">✏️</button>
+                    <button class="sm danger" data-task-del="${t.id}">🗑</button>
+                </td>
+            </tr>`;
+        }).join('');
+        document.getElementById('tasksList').innerHTML = list.length
+            ? `<div class="table-wrapper"><table><thead><tr><th></th><th>Задача</th><th>Проект</th><th>Этап</th><th>Статус</th><th>Исполнители</th><th>Дедлайн</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+            : UI.emptyState('▦', 'Задач нет.', 'Добавьте задачи в карточке проекта.');
+
+        const summary = list.length ? `${onlyOverdue ? 'Просрочено: ' : 'Задач: '}${list.length} · Открыто: ${list.filter(t => t.status !== 'DONE' && t.status !== 'CANCELLED').length} · Готово: ${list.filter(t => t.status === 'DONE').length}` : '';
+        document.getElementById('tasksSummary').textContent = summary;
     }
 };
 
@@ -1023,7 +1439,56 @@ function renderSplitShares() {
     });
 }
 
-// ---------------- 12. IMPORT / EXPORT ----------------
+// ---------------- 12. IMPORT / EXPORT / BACKUP ----------------
+
+// Real, restorable backup stored in localStorage (separate slot from live data).
+const Backup = {
+    AUTO_KEY: 'brigadeProV2_autobackup',
+
+    // Serialize current data with metadata and persist it. Returns metadata or null on failure.
+    create() {
+        const payload = {
+            application: 'Brigade Manager Pro',
+            applicationVersion: CONFIG.APP_VERSION,
+            schemaVersion: CONFIG.SCHEMA_VERSION,
+            timestamp: new Date().toISOString(),
+            data: Store.data
+        };
+        try {
+            localStorage.setItem(this.AUTO_KEY, JSON.stringify(payload));
+            return { timestamp: payload.timestamp, size: JSON.stringify(payload).length };
+        } catch (e) {
+            AppLogger.error('Не удалось создать резервную копию', e);
+            UI.toast('Не удалось создать резервную копию (хранилище переполнено?)', 'error');
+            return null;
+        }
+    },
+
+    read() {
+        try { return localStorage.getItem(this.AUTO_KEY); }
+        catch (e) { AppLogger.error('Не удалось прочитать резервную копию', e); return null; }
+    },
+
+    // Restore the auto-backup into the live store (validated, atomic).
+    restore() {
+        const raw = this.read();
+        if (!raw) { UI.toast('Автоматическая копия не найдена', 'warning'); return; }
+        let parsed;
+        try { parsed = JSON.parse(raw); }
+        catch (e) { UI.toast('Автоматическая копия повреждена', 'error'); return; }
+        try {
+            const result = prepareIncomingData(parsed);
+            UI.confirm('Восстановить автокопию?',
+                'Текущие данные будут заменены содержимым последней автоматической копии. Продолжить?',
+                () => { applyIncomingData(result); },
+                true);
+        } catch (e) {
+            AppLogger.error('Ошибка восстановления автокопии', e);
+            UI.toast('Автокопия не распознана. Текущие данные не изменены.', 'error');
+        }
+    }
+};
+
 function exportJSON() {
     const payload = JSON.stringify({
         schemaVersion: CONFIG.SCHEMA_VERSION,
@@ -1055,20 +1520,23 @@ function downloadFile(text, filename, mime) {
     setTimeout(() => { URL.revokeObjectURL(link.href); link.remove(); }, 100);
 }
 
-// safe import: backup current -> validate -> migrate -> normalize -> integrity -> replace
+// safe import: backup current -> parse -> normalize -> migrate -> integrity audit -> confirm -> replace
 function importJSONFile(file) {
     if (!file) return;
-    const backupNow = JSON.stringify(Store.data);
     const reader = new FileReader();
     reader.onload = (ev) => {
         let parsed;
         try { parsed = JSON.parse(ev.target.result); }
         catch (e) { UI.toast('Файл повреждён: неверный формат JSON', 'error'); return; }
         try {
+            // Validate/normalize BEFORE touching live data. On any failure current data stays intact.
             const result = prepareIncomingData(parsed);
+            const warnInfo = result.problems.length ? `\n\n⚠️ Найдено проблем целостности: ${result.problems.length}.` : '';
             UI.confirm('Импорт данных',
-                'Текущие данные будут заменены данными из файла. Текущие данные сохранены как резервная копия в этом окне. Продолжить?',
-                () => { applyIncomingData(result); },
+                'Текущие данные будут заменены данными из файла.' +
+                (result.problems.length ? ' Найдены проблемы целостности: ' + result.problems.length + '.' : '') +
+                ' Перед заменой будет создана резервная копия текущих данных. Продолжить?',
+                () => applyIncomingData(result),
                 true);
         } catch (e) {
             AppLogger.error('Ошибка импорта', e);
@@ -1088,8 +1556,10 @@ function importBackupFile(file) {
         try {
             const result = prepareIncomingData(parsed);
             UI.confirm('Восстановление из копии',
-                'Данные будут заменены содержимым резервной копии. Текущие данные вы сможете экспортировать отдельно. Продолжить?',
-                () => { applyIncomingData(result); },
+                'Данные будут заменены содержимым резервной копии.' +
+                (result.problems.length ? ' Найдены проблемы целостности: ' + result.problems.length + '.' : '') +
+                ' Перед заменой текущие данные будут сохранены в автокопии. Продолжить?',
+                () => applyIncomingData(result),
                 true);
         } catch (e) {
             AppLogger.error('Ошибка восстановления', e);
@@ -1099,30 +1569,39 @@ function importBackupFile(file) {
     reader.readAsText(file);
 }
 
-// Accepts either {data: {...}} wrapper (backup/export) or a raw data object (legacy import)
+// Accepts either {data: {...}} wrapper (backup/export) or a raw data object (legacy import).
+// Transforms are pure: they do NOT touch the live Store. Returns { data, problems }.
 function prepareIncomingData(parsed) {
-    const raw = (parsed && typeof parsed === 'object' && 'data' in parsed) ? parsed.data : parsed;
+    let raw = (parsed && typeof parsed === 'object' && 'data' in parsed) ? parsed.data : parsed;
     if (!raw || typeof raw !== 'object') throw new Error('bad structure');
     // migrate through schema versions if present, else treat as legacy
     let version = Number(raw.schemaVersion) || 0;
+    if (version > CONFIG.SCHEMA_VERSION) throw new Error('newer schema version: ' + version);
     const steps = Migrations.getSteps();
     for (let i = version; i <= CONFIG.SCHEMA_VERSION && i < steps.length; i++) {
         raw = steps[i](raw);
     }
     raw.schemaVersion = CONFIG.SCHEMA_VERSION;
     const data = Validation.normalizeData(raw);
-    // integrity audit
-    const problems = Validation.audit();
-    return { data, problems, backupNow: null };
+    // integrity audit against the NORMALIZED INCOMING data (not Store.data)
+    const problems = Validation.audit(data);
+    return { data, problems };
 }
 
 function applyIncomingData(result) {
+    // Create a real, restorable backup of the CURRENT data before replacing it.
+    const auto = Backup.create();
+    if (!auto) {
+        // If we can't protect current data, abort the replacement.
+        UI.toast('Невозможно создать защитную копию — замена данных отменена.', 'error');
+        return;
+    }
     Store.replaceData(result.data);
     if (result.problems && result.problems.length) {
         AppLogger.warn('Проблемы целостности при импорте: ', result.problems);
-        UI.toast('Данные импортированы. Обнаружены ссылки на удалённые записи: ' + result.problems.length, 'warning');
+        UI.toast('Данные импортированы. Обнаружены проблемы целостности: ' + result.problems.length + '. Автокопия: ' + auto.timestamp.slice(0, 16).replace('T', ' '), 'warning');
     } else {
-        UI.toast('Данные загружены', 'success');
+        UI.toast('Данные загружены. Автокопия: ' + auto.timestamp.slice(0, 16).replace('T', ' '), 'success');
     }
     renderAll();
 }
@@ -1159,6 +1638,13 @@ function verifyBackup() {
 }
 
 // ---------------- 13. Reports ----------------
+function updateTaskFilters() {
+    const psel = document.getElementById('taskFilterProject');
+    const cur = psel.value;
+    psel.innerHTML = '<option value="all">Все проекты</option>' + Store.data.projects.map(p => `<option value="${Utils.escapeHtml(p.id)}">${Utils.escapeHtml(p.name)}</option>`).join('');
+    if (['all'].includes(cur) || Store.data.projects.some(p => Utils.eq(p.id, cur))) psel.value = cur;
+}
+
 function updateReportFilters() {
     document.getElementById('reportProject').innerHTML = '<option value="all">Все проекты</option>' + Store.data.projects.map(p => `<option value="${Utils.escapeHtml(p.id)}">${p.active ? '' : '(арх) '}${Utils.escapeHtml(p.name)}</option>`).join('');
 }
@@ -1201,7 +1687,7 @@ function addProjectForm() {
     Store.addProject({
         name,
         budget: Utils.cents(document.getElementById('projectBudget').value) / 100,
-        currency: document.getElementById('projectCurrency').value,
+        currency: Store.settings().currency,
         status: document.getElementById('projectStatus').value,
         desc: document.getElementById('projectDesc').value
     });
@@ -1218,6 +1704,10 @@ function openEditProject(id) {
          <div class="group-field"><label>Бюджет</label><input id="pBudget" type="number" min="0" step="0.01" value="${p.budget}"></div>
          <div class="group-field"><label>Валюта</label><select id="pCurrency">${['RUB', 'USD', 'EUR'].map(c => `<option ${p.currency === c ? 'selected' : ''} value="${c}">${c}</option>`).join('')}</select></div>
          <div class="group-field"><label>Статус</label><select id="pStatus">${CONFIG.PROJECT_STATUSES.map(s => `<option ${p.status === s ? 'selected' : ''} value="${s}">${s}</option>`).join('')}</select></div>
+         <div class="group-field"><label>Дата начала (план)</label><input id="pStart" type="date" value="${Utils.escapeHtml(p.startDate || '')}"></div>
+         <div class="group-field"><label>Дата окончания (план)</label><input id="pEnd" type="date" value="${Utils.escapeHtml(p.endDate || '')}"></div>
+         <div class="group-field"><label>Приоритет</label><select id="pPriority">${CONFIG.PROJECT_PRIORITIES.map(x => `<option ${p.priority === x ? 'selected' : ''} value="${x}">${x}</option>`).join('')}</select></div>
+         <div class="group-field"><label>Ответственный</label><input id="pLead" value="${Utils.escapeHtml(p.lead || '')}"></div>
          <div class="group-field"><label>Описание</label><textarea id="pDesc" rows="2">${Utils.escapeHtml(p.desc || '')}</textarea></div>`,
         modalActionsHTML());
     wireModal(() => {
@@ -1226,8 +1716,12 @@ function openEditProject(id) {
         Store.updateProject(id, {
             name,
             budget: Utils.cents(document.getElementById('pBudget').value) / 100,
-            currency: document.getElementById('pCurrency').value,
+            currency: Store.settings().currency,
             status: document.getElementById('pStatus').value,
+            startDate: document.getElementById('pStart').value || '',
+            endDate: document.getElementById('pEnd').value || '',
+            priority: document.getElementById('pPriority').value,
+            lead: document.getElementById('pLead').value.trim(),
             desc: document.getElementById('pDesc').value
         });
         UI.toast('Проект обновлён');
@@ -1241,9 +1735,86 @@ function openProjectDetail(id) {
     if (!p) return;
     const st = Calc.projectStats(id);
     const cats = Calc.projectCategoryCents(id);
-    const cur = p.currency;
+    const cur = Store.settings().currency;
+    const direct = Calc.projectDirectExpenseCents(id);
+    const labor = Calc.projectLaborCostCents(id);
+    const total = Calc.projectTotalCostCents(id);
+    const overHtml = st.over
+        ? `<p style="margin-top:12px;color:var(--danger);font-weight:bold;">⚠️ Бюджет превышен на ${Utils.formatMoneyCents(st.remaining < 0 ? -st.remaining : 0, cur)}</p>`
+        : (st.warn ? `<p style="margin-top:12px;color:var(--warning);font-weight:bold;">⚠️ Использовано ${st.pct.toFixed(0)}% бюджета</p>` : '');
     const catRows = Object.entries(cats).sort((a, b) => b[1] - a[1]).map(([k, v]) =>
         `<tr><td>${Utils.escapeHtml(CONFIG.CATEGORIES[k] || k)}</td><td>${Utils.formatMoneyCents(v, cur)}</td></tr>`).join('');
+
+    const priBadge = p.priority && p.priority !== 'NORMAL' ? ` <span class="badge pri-${String(p.priority).toLowerCase()}">${p.priority}</span>` : '';
+    const planHtml = `<div class="dl"><span>План</span><b>${p.startDate ? Utils.formatDate(p.startDate) : '—'} → ${p.endDate ? Utils.formatDate(p.endDate) : '—'}</b></div>
+        <div class="dl"><span>Приоритет</span><b>${Utils.escapeHtml(p.priority || 'NORMAL')} ${priBadge}</b></div>
+        <div class="dl"><span>Ответственный</span><b>${Utils.escapeHtml(p.lead || '—')}</b></div>`;
+
+    // Worker assignment
+    const wAssign = Calc.projectWorkersDetailed(id).map(w =>
+        `<tr><td>${Utils.escapeHtml(w.name)}${w.active ? '' : ' <small>(арх)</small>'}</td><td>${w.hours}ч</td><td>${Utils.formatMoneyCents(w.earnedCents, cur)}</td><td>${w.openTasks}</td></tr>`).join('');
+
+    // Stages
+    const stages = Store.stagesOfProject(id);
+    const stageRow = (s, i) => {
+        const stStatus = { planning: 'План', active: 'Активен', done: 'Готов', archived: 'Архив' }[s.status] || s.status;
+        const flags = ['↑', '↓'];
+        return `<div class="stage-row ${s.status === 'archived' ? 'archived' : ''}">
+            <div style="flex:1;min-width:0">
+                <div><b>${i + 1}. ${Utils.escapeHtml(s.name)}</b> <span class="badge st-${s.status}">${stStatus}</span></div>
+                ${s.description ? `<div style="color:var(--secondary);font-size:12px">${Utils.escapeHtml(s.description)}</div>` : ''}
+                ${(s.startDate || s.endDate) ? `<div style="color:var(--secondary);font-size:11px">${s.startDate ? Utils.formatDate(s.startDate) : ''}${s.startDate && s.endDate ? ' → ' : ''}${s.endDate ? Utils.formatDate(s.endDate) : ''}</div>` : ''}
+            </div>
+            <div style="display:flex;gap:4px;flex-wrap:wrap">
+                <button class="sm secondary" data-stage-move="${s.id}" data-dir="-1" ${i === 0 ? 'disabled' : ''} title="Вверх">↑</button>
+                <button class="sm secondary" data-stage-move="${s.id}" data-dir="1" ${i === stages.length - 1 ? 'disabled' : ''} title="Вниз">↓</button>
+                <button class="sm secondary" data-stage-edit="${s.id}">✏️</button>
+                ${s.status === 'done' ? '' : `<button class="sm success" data-stage-status="${s.id}" data-st="done">✓</button>`}
+                ${s.status === 'active' ? '' : `<button class="sm primary" data-stage-status="${s.id}" data-st="active">▶</button>`}
+                ${s.status !== 'archived' ? `<button class="sm danger" data-stage-status="${s.id}" data-st="archived">🗄</button>` : ''}
+            </div>
+        </div>`;
+    };
+    const stagesHtml = CONFIG.features.stages
+        ? `<h3 style="margin-top:18px;">Этапы проекта</h3>
+           ${stages.length ? stages.map(stageRow).join('') : '<p style="color:var(--secondary);font-size:13px">Этапов пока нет.</p>'}
+           <div style="margin-top:8px"><button class="sm success" data-stage-add="${id}">➕ Добавить этап</button></div>`
+        : '';
+
+    // Tasks
+    const tasks = Store.data.tasks.filter(t => Utils.eq(t.projectId, id)).sort((a, b) => {
+        const pr = { URGENT: 0, HIGH: 1, NORMAL: 2, LOW: 3 };
+        return (pr[a.priority] || 9) - (pr[b.priority] || 9);
+    });
+    const taskRow = t => {
+        const overdue = Calc.taskOverdue(t);
+        const stageName = t.stageId ? (Store.data.stages.find(x => Utils.eq(x.id, t.stageId)) || {}).name : '';
+        const wnames = (t.workerIds || []).map(wid => { const w = Store.getWorker(wid); return w ? w.name : '?'; }).join(', ');
+        const priBadge2 = t.priority !== 'NORMAL' ? ` <span class="badge pri-${String(t.priority).toLowerCase()}">${t.priority}</span>` : '';
+        return `<div class="task-row ${t.status === 'CANCELLED' ? 'archived' : ''} ${overdue ? 'overdue' : ''}">
+            <label class="task-check">
+                <input type="checkbox" data-task-toggle="${t.id}" ${t.status === 'DONE' ? 'checked' : ''} ${t.status === 'CANCELLED' ? 'disabled' : ''}>
+                <span class="${t.status === 'DONE' ? 'done' : ''}"><b>${Utils.escapeHtml(t.title)}</b></span>
+            </label>
+            <div style="color:var(--secondary);font-size:12px;margin:2px 0 0 24px">
+                ${stageName ? 'Этап: ' + Utils.escapeHtml(stageName) + ' · ' : ''}${wnames ? 'Исп: ' + Utils.escapeHtml(wnames) + ' · ' : ''}
+                Статус: ${t.status} ${priBadge2}
+                ${t.dueDate ? ' · Дедлайн: <b class="' + (overdue ? 'text-danger" >' : '">') + Utils.formatDate(t.dueDate) + '</b>' : ''}
+                ${overdue ? ' <span class="badge pri-urgent" >ПРОСРОЧЕНО</span>' : ''}
+            </div>
+            <div style="display:flex;gap:4px;margin-left:24px;margin-top:4px">
+                <button class="sm primary" data-task-status="${t.id}" data-st="IN_PROGRESS">▶</button>
+                <button class="sm secondary" data-task-edit="${t.id}">✏️</button>
+                <button class="sm danger" data-task-del="${t.id}">🗑</button>
+            </div>
+        </div>`;
+    };
+    const tasksHtml = CONFIG.features.tasks
+        ? `<h3 style="margin-top:18px;">Задачи проекта</h3>
+           ${tasks.length ? tasks.map(taskRow).join('') : '<p style="color:var(--secondary);font-size:13px">Задач нет.</p>'}
+           <div style="margin-top:8px"><button class="sm success" data-task-add="${id}">➕ Добавить задачу</button></div>`
+        : '';
+
     UI.openModal('Проект: ' + p.name,
         `<div class="detail-grid">
             <div class="dl"><span>Статус</span><b>${p.active ? p.status : 'Архив'}</b></div>
@@ -1253,11 +1824,96 @@ function openProjectDetail(id) {
             <div class="dl"><span>Использовано</span><b>${p.budget > 0 ? st.pct.toFixed(1) + '%' : '-'}</b></div>
             <div class="dl"><span>Работников</span><b>${Calc.projectWorkers(id).length}</b></div>
             <div class="dl"><span>Часов</span><b>${Calc.projectHours(id)}</b></div>
+            ${planHtml}
         </div>
+        ${st.budget > 0 ? `<div class="progress-bar" style="margin-top:12px"><div class="progress-fill ${st.over ? 'over-budget' : st.warn ? 'warn' : ''}" style="width:${Math.min(st.pct, 100)}%"></div></div>` : ''}
+        <h3 style="margin-top:18px;">Стоимость проекта</h3>
+        <div class="detail-grid">
+            <div class="dl"><span>Прямые расходы</span><b>${Utils.formatMoneyCents(direct, cur)}</b></div>
+            <div class="dl"><span>Стоимость труда</span><b>${Utils.formatMoneyCents(labor, cur)}</b></div>
+            <div class="dl"><span>Итого</span><b>${Utils.formatMoneyCents(total, cur)}</b></div>
+        </div>
+        ${overHtml}
         ${p.desc ? `<p style="margin-top:15px;color:var(--secondary);font-size:13px;">${Utils.escapeHtml(p.desc)}</p>` : ''}
+        ${stagesHtml}
+        ${tasksHtml}
+        ${wAssign ? `<h3 style="margin-top:18px;">Работники на проекте</h3><div class="table-wrapper"><table><thead><tr><th>Работник</th><th>Часы</th><th>Заработано</th><th>Открытых задач</th></tr></thead><tbody>${wAssign}</tbody></table></div>` : ''}
         <h3 style="margin-top:20px;">Расходы по категориям</h3>
         <div class="table-wrapper"><table><thead><tr><th>Категория</th><th>Сумма</th></tr></thead><tbody>${catRows || '<tr><td colspan="2" style="text-align:center;color:var(--secondary)">Нет расходов</td></tr>'}</tbody></table></div>`,
         `<button class="secondary" data-modal-close>Закрыть</button>`);
+}
+
+function openStageForm(params) {
+    const existing = params && params.id ? Store.data.stages.find(x => Utils.eq(x.id, params.id)) : null;
+    const pid = existing ? existing.projectId : params.projectId;
+    const p = Store.getProject(pid);
+    if (!p) return;
+    const statusOpts = CONFIG.STAGE_STATUSES.map(s => `<option ${existing && existing.status === s ? 'selected' : ''} value="${s}">${s}</option>`).join('');
+    UI.openModal(existing ? 'Редактировать этап' : 'Добавить этап',
+        `<div class="group-field"><label>Название *</label><input id="sgName" value="${existing ? Utils.escapeHtml(existing.name) : ''}"></div>
+         <div class="group-field"><label>Статус</label><select id="sgStatus">${statusOpts}</select></div>
+         <div class="group-field"><label>Описание</label><input id="sgDesc" value="${existing ? Utils.escapeHtml(existing.description || '') : ''}"></div>
+         <div class="group-field"><label>Дата начала</label><input id="sgStart" type="date" value="${Utils.escapeHtml(existing ? existing.startDate || '' : '')}"></div>
+         <div class="group-field"><label>Дата окончания</label><input id="sgEnd" type="date" value="${Utils.escapeHtml(existing ? existing.endDate || '' : '')}"></div>`,
+        modalActionsHTML());
+    wireModal(() => {
+        const name = document.getElementById('sgName').value.trim();
+        if (!name) { UI.toast('Введите название этапа', 'error'); return false; }
+        const payload = {
+            name,
+            status: document.getElementById('sgStatus').value,
+            description: document.getElementById('sgDesc').value.trim(),
+            startDate: document.getElementById('sgStart').value || '',
+            endDate: document.getElementById('sgEnd').value || ''
+        };
+        if (existing) Store.updateStage(existing.id, payload);
+        else Store.addStage({ projectId: pid, ...payload });
+        UI.toast(existing ? 'Этап обновлён' : 'Этап добавлен');
+        openProjectDetail(pid);
+        renderAll();
+        return true;
+    });
+}
+
+function openTaskForm(params) {
+    const existing = params && params.id ? Store.data.tasks.find(x => Utils.eq(x.id, params.id)) : null;
+    const pid = existing ? existing.projectId : params.projectId;
+    const p = Store.getProject(pid);
+    if (!p) return;
+    const stages = Store.stagesOfProject(pid).filter(s => s.status !== 'archived');
+    const stageOpts = '<option value="">— без этапа —</option>' + stages.map(s => `<option ${existing && Utils.eq(existing.stageId, s.id) ? 'selected' : ''} value="${Utils.escapeHtml(s.id)}">${Utils.escapeHtml(s.name)}</option>`).join('');
+    const statusOpts = CONFIG.TASK_STATUSES.map(s => `<option ${existing && existing.status === s ? 'selected' : ''} value="${s}">${s}</option>`).join('');
+    const priOpts = CONFIG.TASK_PRIORITIES.map(x => `<option ${(existing ? existing.priority === x : x === 'NORMAL') ? 'selected' : ''} value="${x}">${x}</option>`).join('');
+    const workerOpts = Store.data.workers.map(w => `<label class="checkbox-row" style="justify-content:flex-start;gap:8px;font-weight:normal"><input type="checkbox" class="tk-wk" value="${Utils.escapeHtml(w.id)}" ${existing && (existing.workerIds || []).includes(String(w.id)) ? 'checked' : ''}> <span>${Utils.escapeHtml(w.name)}${w.active ? '' : ' (арх)'}</span></label>`).join('');
+    UI.openModal(existing ? 'Редактировать задачу' : 'Добавить задачу',
+        `<div class="group-field"><label>Название *</label><input id="tkTitle" value="${existing ? Utils.escapeHtml(existing.title) : ''}"></div>
+         <div class="group-field"><label>Этап</label><select id="tkStage">${stageOpts}</select></div>
+         <div class="group-field"><label>Статус</label><select id="tkStatus">${statusOpts}</select></div>
+         <div class="group-field"><label>Приоритет</label><select id="tkPriority">${priOpts}</select></div>
+         <div class="group-field"><label>Дедлайн</label><input id="tkDue" type="date" value="${Utils.escapeHtml(existing ? existing.dueDate || '' : '')}"></div>
+         <div class="group-field"><label>Описание</label><input id="tkDesc" value="${Utils.escapeHtml(existing ? existing.description || '' : '')}"></div>
+         ${workerOpts ? `<div class="group-field"><label>Исполнители</label>${workerOpts}</div>` : '<div class="group-field"><small>Нет работников. Сначала добавьте работников.</small></div>'}`,
+        modalActionsHTML());
+    wireModal(() => {
+        const title = document.getElementById('tkTitle').value.trim();
+        if (!title) { UI.toast('Введите название задачи', 'error'); return false; }
+        const workerIds = [...document.querySelectorAll('.tk-wk:checked')].map(cb => cb.value);
+        const payload = {
+            title,
+            stageId: document.getElementById('tkStage').value,
+            status: document.getElementById('tkStatus').value,
+            priority: document.getElementById('tkPriority').value,
+            dueDate: document.getElementById('tkDue').value || '',
+            description: document.getElementById('tkDesc').value.trim(),
+            workerIds
+        };
+        if (existing) Store.updateTask(existing.id, payload);
+        else Store.addTask({ projectId: pid, ...payload });
+        UI.toast(existing ? 'Задача обновлена' : 'Задача добавлена');
+        openProjectDetail(pid);
+        renderAll();
+        return true;
+    });
 }
 
 function addWorkerForm() {
@@ -1320,23 +1976,23 @@ function openWorkerDetail(id) {
         if (!CONFIG.PAYMENT_CATEGORIES.includes(e.category)) return;
         if (!(e.workers || []).includes(String(id))) return;
         const share = Utils.toRub(Calc.expenseWorkerShareCents(e, id));
-        ops.push({ date: e.date, text: (CONFIG.CATEGORIES[e.category] || e.category) + ' ' + share + ' ₽', type: 'paid' });
+        ops.push({ date: e.date, text: (CONFIG.CATEGORIES[e.category] || e.category) + ' ' + Utils.formatMoney(share, cur), type: 'paid' });
     });
     Store.data.timeEntries.forEach(t => {
         if (!Utils.eq(t.workerId, id)) return;
-        ops.push({ date: t.date, text: t.hours + ' ч × ' + w.rate + ' ₽', type: 'earned' });
+        ops.push({ date: t.date, text: t.hours + ' ч × ' + Utils.formatMoney(w.rate, cur), type: 'earned' });
     });
     ops.sort((a, b) => (a.date < b.date ? -1 : 1)).reverse();
     const opsHtml = ops.slice(0, 10).map(o => `<tr><td>${Utils.escapeHtml(Utils.formatDate(o.date))}</td><td>${Utils.escapeHtml(o.text)}</td></tr>`).join('');
 
     UI.openModal('Работник: ' + w.name,
         `<div class="detail-grid">
-            <div class="dl"><span>Ставка</span><b>${w.rate} ₽/ч</b></div>
+            <div class="dl"><span>Ставка</span><b>${Utils.formatMoney(w.rate, cur)}/ч</b></div>
             <div class="dl"><span>Статус</span><b>${w.active ? 'Активен' : 'Архив'}</b></div>
             <div class="dl"><span>Часы</span><b>${hours}</b></div>
             <div class="dl"><span>Заработано</span><b>${Utils.formatMoneyCents(earned, cur)}</b></div>
             <div class="dl"><span>Выплачено</span><b>${Utils.formatMoneyCents(paid, cur)}</b></div>
-            <div class="dl"><span>Долг</span><b style="color:${debt > 0 ? 'var(--danger)' : debt < 0 ? 'var(--success)' : 'inherit'}">${Utils.formatMoneyCents(debt, cur)}</b></div>
+            <div class="dl"><span>Долг</span><b style="color:${debt > 0 ? 'var(--danger)' : debt < 0 ? 'var(--success)' : 'inherit'}">${debt < 0 ? 'Переплата: ' + Utils.formatMoneyCents(Math.abs(debt), cur) : Utils.formatMoneyCents(debt, cur)}</b></div>
         </div>
         ${w.phone ? `<p style="margin-top:12px"><span class="pill">📞 ${Utils.escapeHtml(w.phone)}</span></p>` : ''}
         ${w.position ? `<p><span class="pill">🛠 ${Utils.escapeHtml(w.position)}</span></p>` : ''}
@@ -1372,14 +2028,17 @@ function addExpense() {
     const { workers, splits, splitSumCents } = collectSplitsFromForm();
     const amtCents = Utils.cents(amt);
 
+    let splitsCents = null;
     if (workers.length) {
-        if (splitSumCents > 0 && Math.abs(splitSumCents - amtCents) > 1) {
-            UI.toast('Сумма долей работников не совпадает с общей суммой', 'error');
+        const r = Utils.computeSplitsCents(workers, splits, amtCents);
+        if (r.error) {
+            UI.toast(r.error === 'over' ? 'Сумма долей работников превышает общую сумму' : 'Сумма долей не совпадает с общей суммой', 'error');
             return;
         }
-        // even split for selected workers without amounts
-        workers.forEach(wid => { if (splits[wid] == null || splits[wid] === 0) splits[wid] = Utils.toRub(Utils.cents(amt / workers.length)); });
+        splitsCents = r.splitsCents;
     }
+    // splits are stored in rubles (calc layer converts with Utils.cents)
+    const splitsRub = splitsCents ? Object.fromEntries(Object.entries(splitsCents).map(([k, c]) => [k, Utils.toRub(c)])) : null;
 
     const expense = Store.addExpense({
         projectId: String(pid),
@@ -1388,7 +2047,7 @@ function addExpense() {
         date,
         desc: document.getElementById('expenseDesc').value,
         workers,
-        splits
+        splits: splitsRub
     });
 
     // budget checks
@@ -1425,10 +2084,13 @@ function openEditExpense(id) {
         const date = document.getElementById('eDate').value || Utils.todayStr();
         if (!Utils.validateDate(date)) { UI.toast('Укажите корректную дату', 'error'); return false; }
         const { workers, splits } = collectSplitsFromModal('eSplits');
+        let splitsCents = null;
         if (workers.length) {
-            const splitSum = Object.values(splits).reduce((s, v) => s + Utils.cents(v), 0);
-            if (Math.abs(splitSum - Utils.cents(amt)) > 1) { UI.toast('Сумма долей не совпадает с общей суммой', 'error'); return false; }
+            const r = Utils.computeSplitsCents(workers, splits, Utils.cents(amt));
+            if (r.error) { UI.toast(r.error === 'over' ? 'Сумма долей превышает общую сумму' : 'Сумма долей не совпадает с общей суммой', 'error'); return false; }
+            splitsCents = r.splitsCents;
         }
+        const splitsRub = splitsCents ? Object.fromEntries(Object.entries(splitsCents).map(([k, c]) => [k, Utils.toRub(c)])) : null;
         Store.updateExpense(id, {
             projectId: document.getElementById('eProject').value,
             category: document.getElementById('eCategory').value,
@@ -1436,7 +2098,7 @@ function openEditExpense(id) {
             date,
             desc: document.getElementById('eDesc').value,
             workers,
-            splits
+            splits: splitsRub
         });
         UI.toast('Операция обновлена');
         renderAll();
@@ -1471,11 +2133,7 @@ function collectSplitsFromModal(containerId) {
         const v = parseFloat(inp ? inp.value : '') || 0;
         splits[wid] = v > 0 ? v : null;
     });
-    // even split for selected workers without an entered amount
-    if (workers.length) {
-        const amtCents = Utils.cents(parseFloat(document.getElementById('eAmount').value || 0));
-        workers.forEach(wid => { if (splits[wid] == null) splits[wid] = Utils.toRub(Math.round(amtCents / workers.length)); });
-    }
+    // Leave empty amounts as null: computeSplitsCents distributes the exact remainder.
     return { workers, splits };
 }
 
@@ -1517,10 +2175,12 @@ function openEditTime(id) {
     wireModal(() => {
         const hrs = parseFloat(document.getElementById('tHours').value);
         if (!Utils.validateHours(hrs)) { UI.toast('Количество часов некорректно', 'error'); return false; }
+        const date = document.getElementById('tDate').value || Utils.todayStr();
+        if (!Utils.validateDate(date)) { UI.toast('Укажите корректную дату', 'error'); return false; }
         Store.updateTimeEntry(id, {
             workerId: document.getElementById('tWorker').value,
             projectId: document.getElementById('tProject').value,
-            date: document.getElementById('tDate').value,
+            date,
             hours: hrs,
             type: document.getElementById('tType').value,
             comment: document.getElementById('tComment').value
@@ -1621,7 +2281,13 @@ function updateTemplateForm() {
 function saveSettingsFromInputs() {
     const s = Store.settings();
     const cur = document.getElementById('setCurrency').value;
-    s.currency = ['RUB', 'USD', 'EUR'].includes(cur) ? cur : 'RUB';
+    const newCur = CONFIG.CURRENCIES.includes(cur) ? cur : 'RUB';
+    if (newCur !== s.currency) {
+        UI.toast('Валюта приложения изменена. Все суммы (проекты, расходы, зарплаты, отчёты) интерпретируются в новой валюте без пересчёта — приложение одновалютное.', 'warning');
+        const pc = document.getElementById('projectCurrency');
+        if (pc) pc.value = newCur;
+    }
+    s.currency = newCur;
     s.budgetWarningPercent = Math.max(1, Math.min(100, parseFloat(document.getElementById('setBudgetWarn').value) || 80));
     s.maxHoursPerDay = Math.max(1, Math.min(168, parseFloat(document.getElementById('setMaxHours').value) || 24));
     s.notifyBudget = document.getElementById('notifyBudgetOver').checked;
@@ -1690,11 +2356,13 @@ function confirmArchiveWorker(id) {
 
 function confirmClearAll() {
     UI.confirm('Очистить ВСЕ данные?',
-        'Будут удалены все проекты, работники, расходы, записи времени и шаблоны. Рекомендуется сначала создать резервную копию (☁️). Действие необратимо.',
+        'Будут удалены все проекты, работники, расходы, записи времени и шаблоны. Перед очисткой будет создана резервная копия текущих данных (её можно восстановить кнопкой автокопии). Действие необратимо.',
         () => {
+            const auto = Backup.create();
+            if (!auto) { UI.toast('Создание автокопии не удалось — очистка отменена.', 'error'); return; }
             Store.data = Validation.normalizeData({});
             Storage.write(Storage._serialize(Store.data), true);
-            UI.toast('Все данные удалены', 'info');
+            UI.toast('Все данные удалены. Автокопия: ' + auto.timestamp.slice(0, 16).replace('T', ' '), 'info');
             renderAll();
         });
 }
@@ -1720,7 +2388,9 @@ function setupEvents() {
         const scoped = e.target.closest('[data-edit-project],[data-edit-worker],[data-edit-expense],[data-edit-time],[data-edit-template],' +
             '[data-detail-project],[data-detail-worker],[data-archive-project],[data-restore-project],' +
             '[data-archive-worker],[data-restore-worker],[data-del-expense],[data-del-time],[data-del-template],' +
-            '[data-dup-expense],[data-apply-template],[data-cal-date]');
+            '[data-dup-expense],[data-apply-template],[data-cal-date],' +
+            '[data-stage-add],[data-stage-edit],[data-stage-move],[data-stage-status],' +
+            '[data-task-add],[data-task-edit],[data-task-del],[data-task-status]');
         if (scoped) {
             e.preventDefault();
             handleScoped(scoped);
@@ -1740,6 +2410,11 @@ function setupEvents() {
             inp.disabled = !e.target.checked;
             if (!e.target.checked) { inp.value = ''; }
             renderSplitSharesFor(e.target.closest('.split-container').id || 'expenseWorkersSplit');
+        } else if (e.target.dataset && e.target.dataset.taskToggle) {
+            const t = Store.data.tasks.find(x => Utils.eq(x.id, e.target.dataset.taskToggle));
+            Store.setTaskStatus(e.target.dataset.taskToggle, e.target.checked ? 'DONE' : 'TODO');
+            if (t && document.getElementById('modalOverlay').classList.contains('active')) openProjectDetail(t.projectId);
+            renderAll();
         }
     });
     document.addEventListener('input', (e) => {
@@ -1779,6 +2454,7 @@ const ACTIONS = {
     'export-backup': exportBackup,
     'pick-import': () => document.getElementById('importFile').click(),
     'pick-restore': () => document.getElementById('restoreFile').click(),
+    'restore-autobackup': () => Backup.restore(),
     'export-csv': exportCSV,
     'print': () => window.print(),
     'verify-backup': verifyBackup,
@@ -1807,10 +2483,49 @@ function handleScoped(el) {
     else if (d.dupExpense) Store.duplicateExpense(d.dupExpense), renderAll(), UI.toast('Операция продублирована');
     else if (d.applyTemplate) applyTemplate(d.applyTemplate);
     else if (d.calDate) openCalendarDay(d.calDate);
+
+    // --- Stages (Phase 1) ---
+    else if (d.stageAdd) openStageForm({ projectId: d.stageAdd });
+    else if (d.stageEdit) {
+        const st = Store.data.stages.find(x => Utils.eq(x.id, d.stageEdit));
+        openStageForm({ id: d.stageEdit, projectId: st ? st.projectId : '' });
+    }
+    else if (d.stageMove) { Store.moveStage(d.stageMove, Number(d.dir) || 0); reopenProjectDetailForStage(d.stageMove); }
+    else if (d.stageStatus) { Store.setStageStatus(d.stageStatus, d.st); reopenProjectDetailForStage(d.stageStatus); }
+
+    // --- Tasks (Phase 1) ---
+    else if (d.taskAdd) openTaskForm({ projectId: d.taskAdd });
+    else if (d.taskEdit) {
+        const tk = Store.data.tasks.find(x => Utils.eq(x.id, d.taskEdit));
+        openTaskForm({ id: d.taskEdit, projectId: tk ? tk.projectId : '' });
+    }
+    else if (d.taskDel) confirmDeleteTask(d.taskDel);
+    else if (d.taskStatus) { Store.setTaskStatus(d.taskStatus, d.st); reopenProjectDetailForTask(d.taskStatus); }
+}
+
+function reopenProjectDetailForStage(stageId) {
+    const s = Store.data.stages.find(x => Utils.eq(x.id, stageId));
+    if (s && document.getElementById('modalOverlay').classList.contains('active')) openProjectDetail(s.projectId);
+    renderAll();
+}
+
+function reopenProjectDetailForTask(taskId) {
+    const t = Store.data.tasks.find(x => Utils.eq(x.id, taskId));
+    if (t && document.getElementById('modalOverlay').classList.contains('active')) openProjectDetail(t.projectId);
+    renderAll();
+}
+
+function confirmDeleteTask(id) {
+    const t = Store.data.tasks.find(x => Utils.eq(x.id, id));
+    UI.confirm('Удалить задачу?', `Задача «${t ? t.title : ''}» будет удалена без возможности восстановления.`, () => {
+        Store.deleteTask(id);
+        if (t) { if (document.getElementById('modalOverlay').classList.contains('active')) openProjectDetail(t.projectId); renderAll(); }
+        UI.toast('Задача удалена');
+    });
 }
 
 function openCalendarDay(dateStr) {
-    const dayExp = Store.data.expenses.filter(e => e.date === dateStr);
+    const dayExp = (Render._expenseDateIndex().get(dateStr) || []);
     const cur = Store.settings().currency;
     const total = dayExp.reduce((s, e) => s + Utils.cents(e.amount), 0);
     const rows = dayExp.map(e => {
@@ -1827,7 +2542,7 @@ function toggleTheme() {
     const b = document.body;
     const isDark = b.getAttribute('data-theme') === 'dark';
     b.setAttribute('data-theme', isDark ? 'light' : 'dark');
-    try { localStorage.setItem('theme', isDark ? 'light' : 'dark'); } catch (e) {}
+    try { localStorage.setItem('theme', isDark ? 'light' : 'dark'); } catch (e) { AppLogger.error('Не удалось сохранить тему', e); }
 }
 
 // ---------------- File inputs ----------------
@@ -1845,7 +2560,7 @@ function setupFileInputs() {
 function initApp() {
     try {
         if (localStorage.getItem('theme') === 'dark') document.body.setAttribute('data-theme', 'dark');
-    } catch (e) {}
+    } catch (e) { AppLogger.error('Не удалось прочитать тему', e); }
 
     Store.load();
     // apply theme
@@ -1857,6 +2572,9 @@ function initApp() {
     updateTimeForm();
     updateTemplateForm();
     updateReportFilters();
+    // Single-currency model: project currency selector mirrors the app currency.
+    const pc = document.getElementById('projectCurrency');
+    if (pc) pc.value = Store.settings().currency;
     setupEvents();
     setupFileInputs();
 

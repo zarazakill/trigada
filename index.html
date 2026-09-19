@@ -15,6 +15,7 @@
             <div class="header-actions">
                 <button class="secondary sm" data-action="quick-stats">📊 Статистика</button>
                 <button class="secondary sm" data-action="toggle-theme">🌓 Тема</button>
+                <span id="saveStatus" class="save-status" aria-live="polite">✓ Сохранено</span>
             </div>
         </header>
 
@@ -26,6 +27,7 @@
             <button class="tab" data-tab="timetracking" role="tab" aria-selected="false">⏱ Учет времени</button>
             <button class="tab" data-tab="calendar" role="tab" aria-selected="false">📅 Календарь</button>
             <button class="tab" data-tab="reports" role="tab" aria-selected="false">📈 Отчеты</button>
+            <button class="tab" data-tab="tasks" role="tab" aria-selected="false">▦ Задачи</button>
             <button class="tab" data-tab="templates" role="tab" aria-selected="false">📋 Шаблоны</button>
             <button class="tab" data-tab="settings" role="tab" aria-selected="false">⚙️ Настройки</button>
         </nav>
@@ -34,7 +36,7 @@
         <section id="dashboard" class="tab-content active" role="tabpanel">
             <h2>Обзор проекта</h2>
             <div class="stats-grid" id="dashboardStats"></div>
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 25px;">
+            <div class="charts-row">
                 <div class="chart-container">
                     <h3>Расходы по категориям</h3>
                     <div id="categoryChart"></div>
@@ -308,6 +310,36 @@
             <div id="reportContent"></div>
         </section>
 
+        <!-- ЗАДАЧИ -->
+        <section id="tasks" class="tab-content" role="tabpanel">
+            <h2>Задачи</h2>
+            <p id="tasksSummary" style="margin-bottom:16px;color:var(--secondary);font-size:13px;"></p>
+            <div class="search-filter-bar">
+                <select id="taskFilterProject" data-filter-input="tasks">
+                    <option value="all">Все проекты</option>
+                </select>
+                <select id="taskFilterStatus" data-filter-input="tasks">
+                    <option value="all">Все статусы</option>
+                    <option value="TODO">TODO</option>
+                    <option value="IN_PROGRESS">IN_PROGRESS</option>
+                    <option value="DONE">DONE</option>
+                    <option value="CANCELLED">CANCELLED</option>
+                </select>
+                <select id="taskFilterPriority" data-filter-input="tasks">
+                    <option value="all">Приоритет</option>
+                    <option value="URGENT">URGENT</option>
+                    <option value="HIGH">HIGH</option>
+                    <option value="NORMAL">NORMAL</option>
+                    <option value="LOW">LOW</option>
+                </select>
+                <label class="checkbox-row" style="margin:0;font-weight:normal;">
+                    <input type="checkbox" id="taskFilterOverdue" data-filter-input="tasks">
+                    <span>Только просроченные</span>
+                </label>
+            </div>
+            <div id="tasksList"></div>
+        </section>
+
         <!-- ШАБЛОНЫ -->
         <section id="templates" class="tab-content" role="tabpanel">
             <h2>Шаблоны расходов</h2>
@@ -363,6 +395,7 @@
                     <button class="info" data-action="pick-restore">↩️ Восстановить из копии</button>
                     <input type="file" id="restoreFile" accept=".json" hidden data-raw>
                     <button class="secondary" data-action="verify-backup">🔍 Проверить копию</button>
+                    <button class="secondary" data-action="restore-autobackup">↩️ Восстановить автокопию</button>
                     <button class="danger" data-action="clear-all">⚠️ Очистить всё</button>
                 </div>
             </div>
