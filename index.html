@@ -5,14 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="theme-color" content="#2563eb">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💼</text></svg>">
-    <title>Brigade Manager Pro</title>
-    <link rel="stylesheet" href="styles.css">
+    <title>Brigade Manager Pro — Advanced Edition</title>
+
+  <meta property="og:image" content="https://bolt.new/static/og_default.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:image" content="https://bolt.new/static/og_default.png">
 </head>
 <body>
     <div class="container" id="appContainer">
         <header>
             <h1>💼 Brigade Manager Pro</h1>
             <div class="header-actions">
+                <div class="global-search-wrapper">
+                    <input type="text" id="globalSearch" placeholder="Глобальный поиск..." autocomplete="off">
+                    <div id="globalSearchResults" class="global-search-results"></div>
+                </div>
                 <button class="secondary sm" data-action="quick-stats">📊 Статистика</button>
                 <button class="secondary sm" data-action="toggle-theme">🌓 Тема</button>
                 <span id="saveStatus" class="save-status" aria-live="polite">✓ Сохранено</span>
@@ -25,17 +32,23 @@
             <button class="tab" data-tab="workers" role="tab" aria-selected="false">👷 Работники</button>
             <button class="tab" data-tab="expenses" role="tab" aria-selected="false">💸 Расходы</button>
             <button class="tab" data-tab="timetracking" role="tab" aria-selected="false">⏱ Учет времени</button>
+            <button class="tab" data-tab="payroll" role="tab" aria-selected="false">💵 Зарплата</button>
             <button class="tab" data-tab="calendar" role="tab" aria-selected="false">📅 Календарь</button>
-            <button class="tab" data-tab="reports" role="tab" aria-selected="false">📈 Отчеты</button>
             <button class="tab" data-tab="tasks" role="tab" aria-selected="false">▦ Задачи</button>
+            <button class="tab" data-tab="finance" role="tab" aria-selected="false">🏦 Финансы</button>
+            <button class="tab" data-tab="analytics" role="tab" aria-selected="false">📈 Аналитика</button>
+            <button class="tab" data-tab="reports" role="tab" aria-selected="false">📋 Отчеты</button>
             <button class="tab" data-tab="templates" role="tab" aria-selected="false">📋 Шаблоны</button>
+            <button class="tab" data-tab="activity" role="tab" aria-selected="false">📜 История</button>
             <button class="tab" data-tab="settings" role="tab" aria-selected="false">⚙️ Настройки</button>
         </nav>
 
         <!-- ДАШБОРД -->
         <section id="dashboard" class="tab-content active" role="tabpanel">
-            <h2>Обзор проекта</h2>
+            <h2>Обзор</h2>
+            <div id="smartSummary" class="smart-summary"></div>
             <div class="stats-grid" id="dashboardStats"></div>
+            <div id="dashboardAlerts"></div>
             <div class="charts-row">
                 <div class="chart-container">
                     <h3>Расходы по категориям</h3>
@@ -98,6 +111,8 @@
                     <option value="all">Все статусы</option>
                     <option value="active">Активные</option>
                     <option value="completed">Завершенные</option>
+                    <option value="planning">Планирование</option>
+                    <option value="paused">Приостановленные</option>
                 </select>
                 <select id="filterProjectView" data-filter-input="projects">
                     <option value="active">Активные проекты</option>
@@ -265,15 +280,86 @@
             <div class="table-wrapper" id="timeEntriesList"></div>
         </section>
 
+        <!-- ЗАРПЛАТА / PAYROLL -->
+        <section id="payroll" class="tab-content" role="tabpanel">
+            <h2>Зарплата</h2>
+            <div class="search-filter-bar">
+                <select id="payrollPeriod" data-filter-input="payroll">
+                    <option value="all">Всё время</option>
+                    <option value="month">Этот месяц</option>
+                    <option value="week">Эта неделя</option>
+                    <option value="day">Сегодня</option>
+                    <option value="year">Этот год</option>
+                </select>
+            </div>
+            <div class="table-wrapper" id="payrollList"></div>
+        </section>
+
         <!-- КАЛЕНДАРЬ -->
         <section id="calendar" class="tab-content" role="tabpanel">
-            <h2>Календарь расходов</h2>
+            <h2>Календарь</h2>
             <div class="cal-nav">
                 <button class="sm" data-action="cal-prev">◀ Предыдущий</button>
                 <h3 id="calendarMonthYear"></h3>
                 <button class="sm" data-action="cal-next">Следующий ▶</button>
             </div>
             <div class="calendar" id="calendarGrid"></div>
+        </section>
+
+        <!-- ЗАДАЧИ -->
+        <section id="tasks" class="tab-content" role="tabpanel">
+            <h2>Задачи</h2>
+            <p id="tasksSummary" style="margin-bottom:16px;color:var(--secondary);font-size:13px;"></p>
+            <div class="search-filter-bar">
+                <select id="taskFilterProject" data-filter-input="tasks">
+                    <option value="all">Все проекты</option>
+                </select>
+                <select id="taskFilterStatus" data-filter-input="tasks">
+                    <option value="all">Все статусы</option>
+                    <option value="TODO">TODO</option>
+                    <option value="IN_PROGRESS">IN_PROGRESS</option>
+                    <option value="DONE">DONE</option>
+                    <option value="CANCELLED">CANCELLED</option>
+                </select>
+                <select id="taskFilterPriority" data-filter-input="tasks">
+                    <option value="all">Приоритет</option>
+                    <option value="URGENT">URGENT</option>
+                    <option value="HIGH">HIGH</option>
+                    <option value="NORMAL">NORMAL</option>
+                    <option value="LOW">LOW</option>
+                </select>
+                <label class="checkbox-row" style="margin:0;font-weight:normal;">
+                    <input type="checkbox" id="taskFilterOverdue" data-filter-input="tasks">
+                    <span>Только просроченные</span>
+                </label>
+            </div>
+            <div id="tasksList"></div>
+        </section>
+
+        <!-- ФИНАНСЫ -->
+        <section id="finance" class="tab-content" role="tabpanel">
+            <h2>Финансовый центр</h2>
+            <div class="search-filter-bar">
+                <select id="financeProject" data-filter-input="finance">
+                    <option value="all">Все проекты</option>
+                </select>
+                <input type="date" id="financeFrom" data-filter-input="finance" title="С даты">
+                <input type="date" id="financeTo" data-filter-input="finance" title="По дату">
+            </div>
+            <div id="financeContent"></div>
+        </section>
+
+        <!-- АНАЛИТИКА -->
+        <section id="analytics" class="tab-content" role="tabpanel">
+            <h2>Аналитика</h2>
+            <div class="search-filter-bar">
+                <select id="analyticsProject" data-filter-input="analytics">
+                    <option value="all">Все проекты</option>
+                </select>
+                <input type="date" id="analyticsFrom" data-filter-input="analytics" title="С даты">
+                <input type="date" id="analyticsTo" data-filter-input="analytics" title="По дату">
+            </div>
+            <div id="analyticsContent"></div>
         </section>
 
         <!-- ОТЧЕТЫ -->
@@ -311,34 +397,7 @@
         </section>
 
         <!-- ЗАДАЧИ -->
-        <section id="tasks" class="tab-content" role="tabpanel">
-            <h2>Задачи</h2>
-            <p id="tasksSummary" style="margin-bottom:16px;color:var(--secondary);font-size:13px;"></p>
-            <div class="search-filter-bar">
-                <select id="taskFilterProject" data-filter-input="tasks">
-                    <option value="all">Все проекты</option>
-                </select>
-                <select id="taskFilterStatus" data-filter-input="tasks">
-                    <option value="all">Все статусы</option>
-                    <option value="TODO">TODO</option>
-                    <option value="IN_PROGRESS">IN_PROGRESS</option>
-                    <option value="DONE">DONE</option>
-                    <option value="CANCELLED">CANCELLED</option>
-                </select>
-                <select id="taskFilterPriority" data-filter-input="tasks">
-                    <option value="all">Приоритет</option>
-                    <option value="URGENT">URGENT</option>
-                    <option value="HIGH">HIGH</option>
-                    <option value="NORMAL">NORMAL</option>
-                    <option value="LOW">LOW</option>
-                </select>
-                <label class="checkbox-row" style="margin:0;font-weight:normal;">
-                    <input type="checkbox" id="taskFilterOverdue" data-filter-input="tasks">
-                    <span>Только просроченные</span>
-                </label>
-            </div>
-            <div id="tasksList"></div>
-        </section>
+        <!-- (moved above) -->
 
         <!-- ШАБЛОНЫ -->
         <section id="templates" class="tab-content" role="tabpanel">
@@ -381,9 +440,28 @@
             <div id="templatesList"></div>
         </section>
 
+        <!-- ИСТОРИЯ / ACTIVITY LOG -->
+        <section id="activity" class="tab-content" role="tabpanel">
+            <h2>История действий</h2>
+            <p style="margin-bottom:16px;color:var(--secondary);font-size:13px;">Локальный журнал последних действий. Не отправляется наружу.</p>
+            <div class="table-wrapper" id="activityList"></div>
+        </section>
+
         <!-- НАСТРОЙКИ -->
         <section id="settings" class="tab-content" role="tabpanel">
             <h2>Настройки и данные</h2>
+
+            <div class="settings-block">
+                <h3>Центр экспорта (CSV)</h3>
+                <div class="settings-row">
+                    <button class="success" data-action="export-csv">📥 Расходы CSV</button>
+                    <button class="success" data-action="export-csv-projects">📁 Проекты CSV</button>
+                    <button class="success" data-action="export-csv-workers">👷 Работники CSV</button>
+                    <button class="success" data-action="export-csv-time">⏱ Время CSV</button>
+                    <button class="success" data-action="export-csv-tasks">▦ Задачи CSV</button>
+                    <button class="success" data-action="export-csv-payroll">💵 Зарплата CSV</button>
+                </div>
+            </div>
 
             <div class="settings-block">
                 <h3>Управление данными</h3>
@@ -430,6 +508,12 @@
                 </label>
             </div>
 
+            <div class="settings-block">
+                <h3>Здоровье данных</h3>
+                <button class="info" data-action="data-health">🔍 Проверить целостность данных</button>
+                <div id="dataHealthResult" style="margin-top:15px;"></div>
+            </div>
+
             <div class="settings-block help">
                 <h3>💡 Справка</h3>
                 <ul>
@@ -458,6 +542,6 @@
     <!-- Уведомления -->
     <div id="toast-container" aria-live="polite"></div>
 
-    <script type="module" src="app.js"></script>
+    <script type="module" src="/src/app.js"></script>
 </body>
 </html>
