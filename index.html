@@ -28,6 +28,7 @@
 
         <nav class="tabs" id="mainTabs" role="tablist" aria-label="Разделы">
             <button class="tab active" data-tab="dashboard" role="tab" aria-selected="true">📊 Дашборд</button>
+            <button class="tab" data-tab="objects" role="tab" aria-selected="false">🏗 Объекты</button>
             <button class="tab" data-tab="projects" role="tab" aria-selected="false">📁 Проекты</button>
             <button class="tab" data-tab="workers" role="tab" aria-selected="false">👷 Работники</button>
             <button class="tab" data-tab="expenses" role="tab" aria-selected="false">💸 Расходы</button>
@@ -65,6 +66,77 @@
             </div>
         </section>
 
+        <!-- ОБЪЕКТЫ -->
+        <section id="objects" class="tab-content" role="tabpanel">
+            <h2>Строительные объекты</h2>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="objectName">Название объекта *</label>
+                    <input type="text" id="objectName" placeholder="Например: Жилой дом на Ленина 15" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label for="objectType">Тип объекта</label>
+                    <select id="objectType">
+                        <option value="residential">Жилой</option>
+                        <option value="commercial">Коммерческий</option>
+                        <option value="industrial">Промышленный</option>
+                        <option value="infrastructure">Инфраструктура</option>
+                        <option value="renovation">Реновация</option>
+                        <option value="other">Другой</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="objectAddress">Адрес</label>
+                    <input type="text" id="objectAddress" placeholder="ул. Ленина, д. 15" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label for="objectClient">Заказчик</label>
+                    <input type="text" id="objectClient" placeholder="ООО СтройИнвест" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label for="objectContact">Контакт</label>
+                    <input type="text" id="objectContact" placeholder="+7 (999) 123-45-67" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label for="objectArea">Площадь (м²)</label>
+                    <input type="number" id="objectArea" placeholder="0" min="0" step="0.1">
+                </div>
+                <div class="form-group">
+                    <label for="objectFloors">Этажей</label>
+                    <input type="number" id="objectFloors" placeholder="0" min="0" step="1">
+                </div>
+                <div class="form-group" style="grid-column: 1 / -1;">
+                    <label for="objectDesc">Описание</label>
+                    <textarea id="objectDesc" rows="2" placeholder="Детали объекта..."></textarea>
+                </div>
+                <div style="grid-column: 1 / -1;">
+                    <button class="success" data-action="add-object">➕ Добавить объект</button>
+                </div>
+            </div>
+
+            <div class="search-filter-bar">
+                <div class="search-box">
+                    <input type="text" id="searchObjects" placeholder="Поиск объектов..." autocomplete="off" data-filter-input="objects">
+                </div>
+                <select id="filterObjectType" data-filter-input="objects">
+                    <option value="all">Все типы</option>
+                    <option value="residential">Жилые</option>
+                    <option value="commercial">Коммерческие</option>
+                    <option value="industrial">Промышленные</option>
+                    <option value="infrastructure">Инфраструктура</option>
+                    <option value="renovation">Реновация</option>
+                    <option value="other">Другие</option>
+                </select>
+                <select id="filterObjectView" data-filter-input="objects">
+                    <option value="active">Активные</option>
+                    <option value="all">Все</option>
+                    <option value="archived">Архив</option>
+                </select>
+            </div>
+
+            <div id="objectsList" class="cards-grid"></div>
+        </section>
+
         <!-- ПРОЕКТЫ -->
         <section id="projects" class="tab-content" role="tabpanel">
             <h2>Управление проектами</h2>
@@ -72,6 +144,10 @@
                 <div class="form-group">
                     <label for="projectName">Название проекта *</label>
                     <input type="text" id="projectName" placeholder="Например: Ремонт офиса" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label for="projectObject">Объект</label>
+                    <select id="projectObject"></select>
                 </div>
                 <div class="form-group">
                     <label for="projectBudget">Бюджет (руб)</label>

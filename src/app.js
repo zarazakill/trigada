@@ -11,8 +11,8 @@ import { loadFromSupabase, syncToSupabase } from './supabase';
 // ---------------- 1. CONFIG ----------------
 const CONFIG = {
     STORAGE_KEY: 'brigadeProV2',
-    APP_VERSION: '6.0.0',
-    SCHEMA_VERSION: 5,
+    APP_VERSION: '6.1.0',
+    SCHEMA_VERSION: 6,
     DEFAULT_CURRENCY: 'RUB',
     PAYMENT_CATEGORIES: ['advance', 'salary'],
     // Feature flags — disabling a flag removes the feature from UI AND code paths.
@@ -20,7 +20,10 @@ const CONFIG = {
     TASK_STATUSES: ['TODO', 'IN_PROGRESS', 'DONE', 'CANCELLED'],
     TASK_PRIORITIES: ['LOW', 'NORMAL', 'HIGH', 'URGENT'],
     STAGE_STATUSES: ['planning', 'active', 'done', 'archived'],
+    PROJECT_STATUSES_NEW: ['PLANNED', 'ACTIVE', 'PAUSED', 'COMPLETED', 'CANCELLED'],
     PROJECT_PRIORITIES: ['LOW', 'NORMAL', 'HIGH', 'URGENT'],
+    WORK_STATUSES: ['TODO', 'IN_PROGRESS', 'DONE', 'CANCELLED'],
+    OBJECT_TYPES: ['residential', 'commercial', 'industrial', 'infrastructure', 'renovation', 'other'],
     ACTIVITY_LOG_LIMIT: 500,
     RATE_MULTIPLIERS: { regular: 1, overtime: 1.5, weekend: 2 },
     MAX_MONEY: 1e12,
@@ -38,7 +41,7 @@ const CONFIG = {
         tools: 'Инструменты', advance: 'Аванс работнику', salary: 'Зарплата',
         rent: 'Аренда', utilities: 'Коммунальные', other: 'Другое'
     },
-    PROJECT_STATUSES: ['active', 'planning', 'completed', 'paused']
+    PROJECT_STATUSES: ['active', 'planning', 'completed', 'paused', 'PLANNED', 'ACTIVE', 'PAUSED', 'COMPLETED', 'CANCELLED']
 };
 
 // ---------------- 2. LOGGER ----------------
@@ -316,16 +319,43 @@ const Migrations = {
         return data;
     },
 
-    getSteps() { return [this.v0, this.v1, this.v2, this.v3, this.v4]; }
+    // v5: Construction Core — add objects, works, extend stages with planning/actual/budget/progress
+    v5(data) {
+        if (!Array.isArray(data.objects)) data.objects = [];
+        if (!Array.isArray(data.works)) data.works = [];
+        (data.projects || []).forEach(p => {
+            if (p && typeof p === 'object') {
+                if (p.objectId == null) p.objectId = '';
+            }
+        });
+        (data.stages || []).forEach(s => {
+            if (s && typeof s === 'object') {
+                if (s.plannedStart == null) s.plannedStart = '';
+                if (s.plannedEnd == null) s.plannedEnd = '';
+                if (s.actualStart == null) s.actualStart = '';
+                if (s.actualEnd == null) s.actualEnd = '';
+                if (s.progress == null) s.progress = 0;
+                if (s.budget == null) s.budget = 0;
+                if (s.actualCost == null) s.actualCost = 0;
+                if (s.responsible == null) s.responsible = '';
+            }
+        });
+        data.schemaVersion = 6;
+        return data;
+    },
+
+    getSteps() { return [this.v0, this.v1, this.v2, this.v3, this.v4, this.v5]; }
 };
 
 // ---------------- 6. VALIDATION / NORMALIZATION ----------------
 const Validation = {
     normalizeData(raw) {
         const data = {
+            objects: [],
             projects: [], workers: [], expenses: [],
             timeEntries: [], templates: [],
-            stages: [], tasks: [], activityLog: [], notifications: [],
+            stages: [], tasks: [], works: [],
+            activityLog: [], notifications: [],
             settings: { ...CONFIG.DEFAULT_SETTINGS }
         };
         if (!raw || typeof raw !== 'object') return data;
@@ -340,8 +370,18 @@ const Validation = {
             return { ...def, ...item };
         };
 
+        (Array.isArray(raw.objects) ? raw.objects : []).forEach(o => {
+            const obj = normItem(o, { id: Utils.genId(), name: '', address: '', client: '', contact: '', description: '', area: 0, floors: 0, type: 'residential', active: true, createdAt: null, updatedAt: null });
+            if (!obj) return;
+            if (typeof obj.name !== 'string') obj.name = String(obj.name ?? '');
+            obj.area = Number.isFinite(Number(obj.area)) ? Number(obj.area) : 0;
+            obj.floors = Number.isFinite(Number(obj.floors)) ? Math.floor(Number(obj.floors)) : 0;
+            if (!CONFIG.OBJECT_TYPES.includes(obj.type)) obj.type = 'residential';
+            data.objects.push(obj);
+        });
+
         (Array.isArray(raw.projects) ? raw.projects : []).forEach(p => {
-            const o = normItem(p, { id: Utils.genId(), name: '', budget: 0, currency: 'RUB', status: 'active', desc: '', startDate: '', endDate: '', priority: 'NORMAL', lead: '', active: true, createdAt: null, updatedAt: null });
+            const o = normItem(p, { id: Utils.genId(), objectId: '', name: '', budget: 0, currency: 'RUB', status: 'active', desc: '', startDate: '', endDate: '', priority: 'NORMAL', lead: '', active: true, createdAt: null, updatedAt: null });
             if (!o) return;
             if (typeof o.name !== 'string') o.name = String(o.name ?? '');
             o.budget = Number.isFinite(Number(o.budget)) ? Utils.cents(o.budget) / 100 : 0;
@@ -350,6 +390,7 @@ const Validation = {
             if (!Utils.validateDate(o.endDate)) o.endDate = '';
             if (!CONFIG.PROJECT_PRIORITIES.includes(o.priority)) o.priority = 'NORMAL';
             if (o.lead == null) o.lead = '';
+            o.objectId = o.objectId == null ? '' : String(o.objectId);
             data.projects.push(o);
         });
 
@@ -397,7 +438,7 @@ const Validation = {
         });
 
         (Array.isArray(raw.stages) ? raw.stages : []).forEach(s => {
-            const o = normItem(s, { id: Utils.genId(), projectId: '', name: '', description: '', status: 'planning', startDate: '', endDate: '', order: 0 });
+            const o = normItem(s, { id: Utils.genId(), projectId: '', name: '', description: '', status: 'planning', startDate: '', endDate: '', plannedStart: '', plannedEnd: '', actualStart: '', actualEnd: '', progress: 0, budget: 0, actualCost: 0, responsible: '', order: 0 });
             if (!o) return;
             o.projectId = o.projectId == null ? '' : String(o.projectId);
             if (typeof o.name !== 'string') o.name = String(o.name ?? '');
@@ -405,6 +446,14 @@ const Validation = {
             if (typeof o.description !== 'string') o.description = '';
             if (!Utils.validateDate(o.startDate)) o.startDate = '';
             if (!Utils.validateDate(o.endDate)) o.endDate = '';
+            if (!Utils.validateDate(o.plannedStart)) o.plannedStart = '';
+            if (!Utils.validateDate(o.plannedEnd)) o.plannedEnd = '';
+            if (!Utils.validateDate(o.actualStart)) o.actualStart = '';
+            if (!Utils.validateDate(o.actualEnd)) o.actualEnd = '';
+            o.progress = Number.isFinite(Number(o.progress)) ? Math.max(0, Math.min(100, Math.floor(Number(o.progress)))) : 0;
+            o.budget = Number.isFinite(Number(o.budget)) ? Utils.cents(Math.max(0, Number(o.budget))) / 100 : 0;
+            o.actualCost = Number.isFinite(Number(o.actualCost)) ? Utils.cents(Math.max(0, Number(o.actualCost))) / 100 : 0;
+            if (typeof o.responsible !== 'string') o.responsible = String(o.responsible ?? '');
             o.order = Number.isFinite(Number(o.order)) ? Number(o.order) : 0;
             data.stages.push(o);
         });
@@ -428,6 +477,24 @@ const Validation = {
                 o.completedAt = null;
             }
             data.tasks.push(o);
+        });
+
+        (Array.isArray(raw.works) ? raw.works : []).forEach(w => {
+            const o = normItem(w, { id: Utils.genId(), projectId: '', stageId: '', name: '', description: '', unit: '', plannedQuantity: 0, completedQuantity: 0, plannedCost: 0, actualCost: 0, status: 'TODO', responsible: '', sortOrder: 0, active: true, createdAt: null, updatedAt: null });
+            if (!o) return;
+            o.projectId = o.projectId == null ? '' : String(o.projectId);
+            o.stageId = o.stageId == null ? '' : String(o.stageId);
+            if (typeof o.name !== 'string') o.name = String(o.name ?? '');
+            if (typeof o.description !== 'string') o.description = '';
+            if (typeof o.unit !== 'string') o.unit = String(o.unit ?? '');
+            o.plannedQuantity = Number.isFinite(Number(o.plannedQuantity)) ? Number(o.plannedQuantity) : 0;
+            o.completedQuantity = Number.isFinite(Number(o.completedQuantity)) ? Number(o.completedQuantity) : 0;
+            o.plannedCost = Number.isFinite(Number(o.plannedCost)) ? Utils.cents(Math.max(0, Number(o.plannedCost))) / 100 : 0;
+            o.actualCost = Number.isFinite(Number(o.actualCost)) ? Utils.cents(Math.max(0, Number(o.actualCost))) / 100 : 0;
+            if (!CONFIG.WORK_STATUSES.includes(o.status)) o.status = 'TODO';
+            if (typeof o.responsible !== 'string') o.responsible = String(o.responsible ?? '');
+            o.sortOrder = Number.isFinite(Number(o.sortOrder)) ? Number(o.sortOrder) : 0;
+            data.works.push(o);
         });
 
         (Array.isArray(raw.activityLog) ? raw.activityLog : []).forEach(l => {
@@ -596,6 +663,8 @@ const Validation = {
             tasks: (d.tasks || []).length,
             stages: (d.stages || []).length,
             templates: (d.templates || []).length,
+            objects: (d.objects || []).length,
+            works: (d.works || []).length,
             activityLog: (d.activityLog || []).length
         };
         const split = this.auditSplit(d);
@@ -703,6 +772,44 @@ const Store = {
         p.updatedAt = new Date().toISOString();
         this.log('project', 'restore', `Проект «${p.name}»`);
         this.save();
+    },
+
+    // --- Objects ---
+    getObject(id) { return this.data.objects.find(o => Utils.eq(o.id, id)) || null; },
+    activeObjects() { return this.data.objects.filter(o => o.active); },
+    addObject(o) {
+        const now = new Date().toISOString();
+        const obj = { active: true, createdAt: now, updatedAt: now, ...o, id: Utils.genId() };
+        this.data.objects.push(obj);
+        this.log('object', 'create', `Объект «${obj.name}»`);
+        this.save();
+        return obj;
+    },
+    updateObject(id, u) {
+        const o = this.getObject(id);
+        if (!o) return;
+        Object.assign(o, u, { updatedAt: new Date().toISOString() });
+        this.log('object', 'update', `Объект «${o.name}»`);
+        this.save();
+    },
+    archiveObject(id) {
+        const o = this.getObject(id);
+        if (!o) return;
+        o.active = false;
+        o.updatedAt = new Date().toISOString();
+        this.log('object', 'archive', `Объект «${o.name}»`);
+        this.save();
+    },
+    restoreObject(id) {
+        const o = this.getObject(id);
+        if (!o) return;
+        o.active = true;
+        o.updatedAt = new Date().toISOString();
+        this.log('object', 'restore', `Объект «${o.name}»`);
+        this.save();
+    },
+    projectsOfObject(oid) {
+        return this.data.projects.filter(p => Utils.eq(p.objectId, oid));
     },
 
     // --- Workers ---
@@ -920,6 +1027,46 @@ const Store = {
     },
     tasksOfProject(pid) {
         return this.data.tasks.filter(t => Utils.eq(t.projectId, pid));
+    },
+
+    // --- Works ---
+    getWork(id) { return this.data.works.find(w => Utils.eq(w.id, id)) || null; },
+    addWork(w) {
+        const now = new Date().toISOString();
+        const sortOrder = this.data.works.filter(x => Utils.eq(x.stageId, w.stageId)).length;
+        const o = { active: true, ...w, sortOrder, createdAt: now, updatedAt: now, id: Utils.genId() };
+        this.data.works.push(o);
+        this.log('work', 'create', `Работа «${o.name}»`);
+        this.save();
+        return o;
+    },
+    updateWork(id, u) {
+        const w = this.getWork(id);
+        if (!w) return null;
+        Object.assign(w, u, { updatedAt: new Date().toISOString() });
+        this.log('work', 'update', `Работа «${w.name}»`);
+        this.save();
+        return w;
+    },
+    setWorkStatus(id, status) {
+        const w = this.getWork(id);
+        if (!w || !CONFIG.WORK_STATUSES.includes(status)) return;
+        w.status = status;
+        w.updatedAt = new Date().toISOString();
+        this.log('work', 'status', `Работа «${w.name}» → ${status}`);
+        this.save();
+    },
+    deleteWork(id) {
+        const w = this.getWork(id);
+        this.data.works = this.data.works.filter(x => !Utils.eq(x.id, id));
+        if (w) this.log('work', 'delete', `Работа «${w.name}»`);
+        this.save();
+    },
+    worksOfStage(sid) {
+        return this.data.works.filter(w => Utils.eq(w.stageId, sid)).sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+    },
+    worksOfProject(pid) {
+        return this.data.works.filter(w => Utils.eq(w.projectId, pid)).sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
     }
 };
 
@@ -1079,6 +1226,40 @@ const Calc = {
     },
     overdueTasksCount() { return Store.data.tasks.filter(t => this.taskOverdue(t)).length; },
     openTasksCount() { return Store.data.tasks.filter(t => t.status !== 'DONE' && t.status !== 'CANCELLED').length; },
+
+    // Work calculations
+    workProgress(w) {
+        if (!w || !w.plannedQuantity || w.plannedQuantity <= 0) return 0;
+        return Math.min(100, Math.round((w.completedQuantity / w.plannedQuantity) * 100));
+    },
+    workCostVariance(w) {
+        if (!w) return 0;
+        return Utils.cents(w.actualCost) - Utils.cents(w.plannedCost);
+    },
+    stageProgress(s) {
+        if (!s) return 0;
+        if (s.progress > 0) return Math.min(100, Math.max(0, s.progress));
+        const works = Store.worksOfStage(s.id);
+        if (!works.length) return 0;
+        const done = works.filter(w => w.status === 'DONE').length;
+        return Math.round((done / works.length) * 100);
+    },
+    stageBudgetVariance(s) {
+        if (!s) return 0;
+        return Utils.cents(s.actualCost) - Utils.cents(s.budget);
+    },
+    projectProgress(pid) {
+        const stages = Store.stagesOfProject(pid).filter(s => s.status !== 'archived');
+        if (!stages.length) return 0;
+        const total = stages.reduce((sum, s) => sum + this.stageProgress(s), 0);
+        return Math.round(total / stages.length);
+    },
+    projectPlanVariance(pid) {
+        const stages = Store.stagesOfProject(pid);
+        const plannedBudget = stages.reduce((s, st) => s + Utils.cents(st.budget), 0);
+        const actualCost = stages.reduce((s, st) => s + Utils.cents(st.actualCost), 0);
+        return actualCost - plannedBudget;
+    },
 
     // V5: period-scoped calculations (all reuse existing Calc primitives)
     // All period functions use the SAME date range and are mutually exclusive:
@@ -1476,6 +1657,55 @@ const Render = {
         return this._dateIndex;
     },
 
+    objects() {
+        const objSelect = document.getElementById('projectObject');
+        if (objSelect) {
+            const prev = objSelect.value;
+            objSelect.innerHTML = '<option value="">— без объекта —</option>' + Store.activeObjects().map(o => `<option value="${Utils.escapeHtml(o.id)}">${Utils.escapeHtml(o.name)}</option>`).join('');
+            if (prev) objSelect.value = prev;
+        }
+        const search = (document.getElementById('searchObjects') || {}).value || '';
+        const view = (document.getElementById('filterObjectView') || {}).value || 'active';
+        const sq = search.toLowerCase();
+        const list = Store.data.objects.filter(o => {
+            if (view === 'active' && !o.active) return false;
+            if (view === 'archived' && o.active) return false;
+            if (sq && !String(o.name || '').toLowerCase().includes(sq) && !String(o.address || '').toLowerCase().includes(sq) && !String(o.client || '').toLowerCase().includes(sq)) return false;
+            return true;
+        });
+        const el = document.getElementById('objectsList');
+        if (!el) return;
+        const typeLabels = { residential: 'Жилой', commercial: 'Коммерческий', industrial: 'Промышленный', infrastructure: 'Инфраструктура', renovation: 'Реновация', other: 'Другой' };
+        el.innerHTML = list.length ? `<div class="cards-grid">` + list.map(o => {
+            const projs = Store.projectsOfObject(o.id);
+            const activeProj = projs.filter(p => p.active).length;
+            const totalBudget = projs.reduce((s, p) => s + Utils.cents(p.budget), 0);
+            const cur = Store.settings().currency;
+            return `<div class="card ${o.active ? '' : 'archived'}">
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+                    <h3 style="margin:0;">🏗 ${Utils.escapeHtml(o.name)}</h3>
+                    <span class="badge ${o.active ? 'active' : 'archived'}">${o.active ? typeLabels[o.type] || o.type : 'Архив'}</span>
+                </div>
+                ${o.address ? `<p style="color:var(--secondary); font-size:13px; margin:4px 0;">📍 ${Utils.escapeHtml(o.address)}</p>` : ''}
+                <div style="margin-top:8px; font-size:13px;">
+                    ${o.client ? `<div>👤 Заказчик: ${Utils.escapeHtml(o.client)}</div>` : ''}
+                    ${o.contact ? `<div>📞 Контакт: ${Utils.escapeHtml(o.contact)}</div>` : ''}
+                    ${o.area > 0 ? `<div>📐 Площадь: ${o.area} м²</div>` : ''}
+                    ${o.floors > 0 ? `<div>🏢 Этажей: ${o.floors}</div>` : ''}
+                    <div style="color:var(--secondary); margin-top:4px;">Проектов: ${projs.length} (активных: ${activeProj}) · Бюджет: ${Utils.formatMoneyCents(totalBudget, cur)}</div>
+                </div>
+                ${o.description ? `<p style="color:var(--secondary); font-size:12px; margin-top:8px;">${Utils.escapeHtml(o.description)}</p>` : ''}
+                <div class="card-actions">
+                    <button class="sm secondary" data-edit-object="${Utils.escapeHtml(o.id)}">✏️</button>
+                    <button class="sm info" data-detail-object="${Utils.escapeHtml(o.id)}">👁</button>
+                    ${o.active
+                        ? `<button class="sm warning" data-archive-object="${Utils.escapeHtml(o.id)}">🗄 Архив</button>`
+                        : `<button class="sm success" data-restore-object="${Utils.escapeHtml(o.id)}">↩ Восстановить</button>`}
+                </div>
+            </div>`;
+        }).join('') + '</div>' : UI.emptyState('🏗', 'Объектов пока нет.', 'Создайте строительный объект, чтобы привязать к нему проекты.');
+    },
+
     projects() {
         const search = (document.getElementById('searchProjects').value || '').toLowerCase();
         const status = document.getElementById('filterProjectStatus').value;
@@ -1501,10 +1731,14 @@ const Render = {
             const wcount = Calc.projectWorkers(p.id).length;
             const hours = Calc.projectHours(p.id);
             const stageCount = Store.stagesOfProject(p.id).filter(s => s.status !== 'archived').length;
+            const workCount = Store.worksOfProject(p.id).length;
             const openTasks = Store.data.tasks.filter(t => Utils.eq(t.projectId, p.id) && t.status !== 'DONE' && t.status !== 'CANCELLED').length;
+            const obj = p.objectId ? Store.getObject(p.objectId) : null;
+            const objHtml = obj ? ` · 🏗 ${Utils.escapeHtml(obj.name)}` : '';
             const planLine = (p.startDate || p.endDate) ? ` · ${p.startDate ? 'с ' + Utils.formatDate(p.startDate) : ''}${p.endDate ? ' по ' + Utils.formatDate(p.endDate) : ''}` : '';
             const leadHtml = p.lead ? ` · Ответств: ${Utils.escapeHtml(p.lead)}` : '';
             const priBadge = p.priority && p.priority !== 'NORMAL' ? ` <span class="badge pri-${String(p.priority).toLowerCase()}">${p.priority}</span>` : '';
+            const progPct = Calc.projectProgress(p.id);
             return `<div class="card ${p.active ? '' : 'archived'}">
                 <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
                     <h3 style="margin:0;">${Utils.escapeHtml(p.name)}</h3>
@@ -1515,10 +1749,10 @@ const Render = {
                     <div>Бюджет: <b>${Utils.formatMoneyCents(st.budget, cur)}</b></div>
                     <div>Потрачено: <b style="color:${st.over ? 'var(--danger)' : 'var(--text)'}">${Utils.formatMoneyCents(st.spent, cur)}</b></div>
                     <div>Остаток: <b style="color:${st.remaining < 0 ? 'var(--danger)' : 'var(--success)'}">${Utils.formatMoneyCents(st.remaining, cur)}</b></div>
-                    <div style="color:var(--secondary); font-size:12px; margin-top:4px;">Использовано: ${pct.toFixed(1)}% · Работников: ${wcount} · Часов: ${hours}<br>Этапов: ${stageCount} · Открытых задач: ${openTasks}${planLine}${leadHtml}</div>
+                    <div style="color:var(--secondary); font-size:12px; margin-top:4px;">Использовано: ${pct.toFixed(1)}% · Работников: ${wcount} · Часов: ${hours}<br>Этапов: ${stageCount} · Работ: ${workCount} · Открытых задач: ${openTasks}${planLine}${leadHtml}${objHtml}</div>
                     ${priBadge}
                 </div>
-                <div class="progress-bar"><div class="progress-fill ${fillClass}" style="width:${Math.min(pct, 100)}%"></div></div>
+                ${progPct > 0 ? `<div style="font-size:11px;color:var(--secondary);margin-top:4px">Прогресс: ${progPct}%</div><div class="progress-bar"><div class="progress-fill" style="width:${progPct}%"></div></div>` : `<div class="progress-bar"><div class="progress-fill ${fillClass}" style="width:${Math.min(pct, 100)}%"></div></div>`}
                 ${warnHtml}
                 <div class="card-actions">
                     <button class="sm secondary" data-edit-project="${Utils.escapeHtml(p.id)}">✏️</button>
@@ -2352,6 +2586,7 @@ function addProjectForm() {
     if (!name) { UI.toast('Введите название проекта', 'error'); return; }
     Store.addProject({
         name,
+        objectId: document.getElementById('projectObject').value || '',
         budget: Utils.cents(document.getElementById('projectBudget').value) / 100,
         currency: Store.settings().currency,
         status: document.getElementById('projectStatus').value,
@@ -2365,8 +2600,10 @@ function addProjectForm() {
 function openEditProject(id) {
     const p = Store.getProject(id);
     if (!p) return;
+    const objOpts = '<option value="">— без объекта —</option>' + Store.activeObjects().map(o => `<option ${p.objectId && Utils.eq(p.objectId, o.id) ? 'selected' : ''} value="${Utils.escapeHtml(o.id)}">${Utils.escapeHtml(o.name)}</option>`).join('');
     UI.openModal('Редактировать проект',
         `<div class="group-field"><label>Название *</label><input id="pName" value="${Utils.escapeHtml(p.name)}"></div>
+         <div class="group-field"><label>Объект</label><select id="pObject">${objOpts}</select></div>
          <div class="group-field"><label>Бюджет</label><input id="pBudget" type="number" min="0" step="0.01" value="${p.budget}"></div>
          <div class="group-field"><label>Валюта приложения (общая)</label><input id="pCurrency" type="text" readonly value="${Utils.escapeHtml(Store.settings().currency)}" style="background:var(--bg-secondary);color:var(--secondary)"></div>
          <div class="group-field"><label>Статус</label><select id="pStatus">${CONFIG.PROJECT_STATUSES.map(s => `<option ${p.status === s ? 'selected' : ''} value="${s}">${s}</option>`).join('')}</select></div>
@@ -2384,6 +2621,7 @@ function openEditProject(id) {
         if (startDate && endDate && !Utils.validateDateRange(startDate, endDate)) { UI.toast('Дата начала не может быть позже даты окончания', 'error'); return false; }
         Store.updateProject(id, {
             name,
+            objectId: document.getElementById('pObject').value || '',
             budget: Utils.cents(document.getElementById('pBudget').value) / 100,
             currency: Store.settings().currency,
             status: document.getElementById('pStatus').value,
@@ -2422,16 +2660,47 @@ function openProjectDetail(id) {
     const wAssign = Calc.projectWorkersDetailed(id).map(w =>
         `<tr><td>${Utils.escapeHtml(w.name)}${w.active ? '' : ' <small>(арх)</small>'}</td><td>${w.hours}ч</td><td>${Utils.formatMoneyCents(w.earnedCents, cur)}</td><td>${w.openTasks}</td></tr>`).join('');
 
+    const obj = p.objectId ? Store.getObject(p.objectId) : null;
+    const objHtml = obj ? `<div class="dl"><span>Объект</span><b>${Utils.escapeHtml(obj.name)}</b></div>` : '';
+
     const stages = Store.stagesOfProject(id);
     const stageRow = (s, i) => {
         const stStatus = { planning: 'План', active: 'Активен', done: 'Готов', archived: 'Архив' }[s.status] || s.status;
+        const sProg = Calc.stageProgress(s);
+        const sVar = Calc.stageBudgetVariance(s);
+        const works = Store.worksOfStage(s.id);
+        const worksHtml = works.length ? `<div style="margin-top:6px">${works.map(w => {
+            const wp = Calc.workProgress(w);
+            const wv = Calc.workCostVariance(w);
+            return `<div class="work-row">
+                <div style="flex:1;min-width:0">
+                    <b class="${w.status === 'DONE' ? 'done' : ''}">${Utils.escapeHtml(w.name)}</b>
+                    <span class="badge wk-${w.status.toLowerCase()}">${w.status}</span>
+                    ${w.unit ? `<span style="color:var(--secondary);font-size:11px"> · ${w.completedQuantity}/${w.plannedQuantity} ${Utils.escapeHtml(w.unit)}</span>` : ''}
+                    ${w.plannedCost > 0 || w.actualCost > 0 ? `<span style="color:var(--secondary);font-size:11px"> · План: ${Utils.formatMoney(w.plannedCost, cur)} / Факт: ${Utils.formatMoney(w.actualCost, cur)}${wv !== 0 ? ` <span style="color:${wv > 0 ? 'var(--danger)' : 'var(--success)'}">(${wv > 0 ? '+' : ''}${Utils.formatMoney(wv, cur)})</span>` : ''}</span>` : ''}
+                    ${wp > 0 ? `<div class="progress-bar" style="height:4px;margin-top:4px"><div class="progress-fill" style="width:${wp}%"></div></div>` : ''}
+                </div>
+                <div style="display:flex;gap:4px;flex-shrink:0">
+                    <button class="sm secondary" data-work-edit="${w.id}">✏️</button>
+                    <button class="sm danger" data-work-del="${w.id}">🗑</button>
+                </div>
+            </div>`;
+        }).join('')}</div>` : '';
         return `<div class="stage-row ${s.status === 'archived' ? 'archived' : ''}">
             <div style="flex:1;min-width:0">
-                <div><b>${i + 1}. ${Utils.escapeHtml(s.name)}</b> <span class="badge st-${s.status}">${stStatus}</span></div>
+                <div><b>${i + 1}. ${Utils.escapeHtml(s.name)}</b> <span class="badge st-${s.status}">${stStatus}</span>${s.responsible ? ` <span style="color:var(--secondary);font-size:11px">· ${Utils.escapeHtml(s.responsible)}</span>` : ''}</div>
                 ${s.description ? `<div style="color:var(--secondary);font-size:12px">${Utils.escapeHtml(s.description)}</div>` : ''}
-                ${(s.startDate || s.endDate) ? `<div style="color:var(--secondary);font-size:11px">${s.startDate ? Utils.formatDate(s.startDate) : ''}${s.startDate && s.endDate ? ' → ' : ''}${s.endDate ? Utils.formatDate(s.endDate) : ''}</div>` : ''}
+                <div style="color:var(--secondary);font-size:11px;margin-top:2px">
+                    ${s.plannedStart || s.plannedEnd ? `План: ${s.plannedStart ? Utils.formatDate(s.plannedStart) : ''}${s.plannedStart && s.plannedEnd ? ' → ' : ''}${s.plannedEnd ? Utils.formatDate(s.plannedEnd) : ''} · ` : ''}
+                    ${s.actualStart || s.actualEnd ? `Факт: ${s.actualStart ? Utils.formatDate(s.actualStart) : ''}${s.actualStart && s.actualEnd ? ' → ' : ''}${s.actualEnd ? Utils.formatDate(s.actualEnd) : ''}` : ''}
+                    ${(s.budget > 0 || s.actualCost > 0) ? ` · Бюджет: ${Utils.formatMoney(s.budget, cur)} / Факт: ${Utils.formatMoney(s.actualCost, cur)}${sVar !== 0 ? ` <span style="color:${sVar > 0 ? 'var(--danger)' : 'var(--success)'}">(${sVar > 0 ? '+' : ''}${Utils.formatMoney(sVar, cur)})</span>` : ''}` : ''}
+                    ${sProg > 0 ? ` · Прогресс: ${sProg}%` : ''}
+                </div>
+                ${sProg > 0 ? `<div class="progress-bar" style="height:4px;margin-top:4px"><div class="progress-fill" style="width:${sProg}%"></div></div>` : ''}
+                ${worksHtml}
+                ${s.status !== 'archived' ? `<div style="margin-top:4px"><button class="sm success" data-work-add="${s.id}" data-pid="${id}">➕ Работа</button></div>` : ''}
             </div>
-            <div style="display:flex;gap:4px;flex-wrap:wrap">
+            <div style="display:flex;gap:4px;flex-wrap:wrap;flex-shrink:0">
                 <button class="sm secondary" data-stage-move="${s.id}" data-dir="-1" ${i === 0 ? 'disabled' : ''} title="Вверх">↑</button>
                 <button class="sm secondary" data-stage-move="${s.id}" data-dir="1" ${i === stages.length - 1 ? 'disabled' : ''} title="Вниз">↓</button>
                 <button class="sm secondary" data-stage-edit="${s.id}">✏️</button>
@@ -2442,7 +2711,7 @@ function openProjectDetail(id) {
         </div>`;
     };
     const stagesHtml = CONFIG.features.stages
-        ? `<h3 style="margin-top:18px;">Этапы проекта</h3>
+        ? `<h3 style="margin-top:18px;">Этапы и работы</h3>
            ${stages.length ? stages.map(stageRow).join('') : '<p style="color:var(--secondary);font-size:13px">Этапов пока нет.</p>'}
            <div style="margin-top:8px"><button class="sm success" data-stage-add="${id}">➕ Добавить этап</button></div>`
         : '';
@@ -2489,6 +2758,7 @@ function openProjectDetail(id) {
             <div class="dl"><span>Использовано</span><b>${p.budget > 0 ? st.pct.toFixed(1) + '%' : '-'}</b></div>
             <div class="dl"><span>Работников</span><b>${Calc.projectWorkers(id).length}</b></div>
             <div class="dl"><span>Часов</span><b>${Calc.projectHours(id)}</b></div>
+            ${objHtml}
             ${planHtml}
         </div>
         ${st.budget > 0 ? `<div class="progress-bar" style="margin-top:12px"><div class="progress-fill ${st.over ? 'over-budget' : st.warn ? 'warn' : ''}" style="width:${Math.min(st.pct, 100)}%"></div></div>` : ''}
@@ -2518,21 +2788,38 @@ function openStageForm(params) {
         `<div class="group-field"><label>Название *</label><input id="sgName" value="${existing ? Utils.escapeHtml(existing.name) : ''}"></div>
          <div class="group-field"><label>Статус</label><select id="sgStatus">${statusOpts}</select></div>
          <div class="group-field"><label>Описание</label><input id="sgDesc" value="${existing ? Utils.escapeHtml(existing.description || '') : ''}"></div>
-         <div class="group-field"><label>Дата начала</label><input id="sgStart" type="date" value="${Utils.escapeHtml(existing ? existing.startDate || '' : '')}"></div>
-         <div class="group-field"><label>Дата окончания</label><input id="sgEnd" type="date" value="${Utils.escapeHtml(existing ? existing.endDate || '' : '')}"></div>`,
+         <div class="group-field"><label>Дата начала (план)</label><input id="sgPlannedStart" type="date" value="${Utils.escapeHtml(existing ? (existing.plannedStart || '') : '')}"></div>
+         <div class="group-field"><label>Дата окончания (план)</label><input id="sgPlannedEnd" type="date" value="${Utils.escapeHtml(existing ? (existing.plannedEnd || '') : '')}"></div>
+         <div class="group-field"><label>Дата начала (факт)</label><input id="sgActualStart" type="date" value="${Utils.escapeHtml(existing ? (existing.actualStart || '') : '')}"></div>
+         <div class="group-field"><label>Дата окончания (факт)</label><input id="sgActualEnd" type="date" value="${Utils.escapeHtml(existing ? (existing.actualEnd || '') : '')}"></div>
+         <div class="group-field"><label>Бюджет (руб)</label><input id="sgBudget" type="number" min="0" step="0.01" value="${existing ? (existing.budget || 0) : 0}"></div>
+         <div class="group-field"><label>Фактические затраты (руб)</label><input id="sgActualCost" type="number" min="0" step="0.01" value="${existing ? (existing.actualCost || 0) : 0}"></div>
+         <div class="group-field"><label>Прогресс (%)</label><input id="sgProgress" type="number" min="0" max="100" step="1" value="${existing ? (existing.progress || 0) : 0}"></div>
+         <div class="group-field"><label>Ответственный</label><input id="sgResponsible" value="${Utils.escapeHtml(existing ? (existing.responsible || '') : '')}"></div>`,
         modalActionsHTML());
     wireModal(() => {
         const name = document.getElementById('sgName').value.trim();
         if (!name) { UI.toast('Введите название этапа', 'error'); return false; }
-        const startDate = document.getElementById('sgStart').value || '';
-        const endDate = document.getElementById('sgEnd').value || '';
-        if (startDate && endDate && !Utils.validateDateRange(startDate, endDate)) { UI.toast('Дата начала этапа не может быть позже даты окончания', 'error'); return false; }
+        const plannedStart = document.getElementById('sgPlannedStart').value || '';
+        const plannedEnd = document.getElementById('sgPlannedEnd').value || '';
+        const actualStart = document.getElementById('sgActualStart').value || '';
+        const actualEnd = document.getElementById('sgActualEnd').value || '';
+        if (plannedStart && plannedEnd && !Utils.validateDateRange(plannedStart, plannedEnd)) { UI.toast('Плановая дата начала не может быть позже плановой даты окончания', 'error'); return false; }
+        if (actualStart && actualEnd && !Utils.validateDateRange(actualStart, actualEnd)) { UI.toast('Фактическая дата начала не может быть позже фактической даты окончания', 'error'); return false; }
+        let progress = parseInt(document.getElementById('sgProgress').value) || 0;
+        progress = Math.max(0, Math.min(100, progress));
         const payload = {
             name,
             status: document.getElementById('sgStatus').value,
             description: document.getElementById('sgDesc').value.trim(),
-            startDate,
-            endDate
+            plannedStart,
+            plannedEnd,
+            actualStart,
+            actualEnd,
+            budget: parseFloat(document.getElementById('sgBudget').value) || 0,
+            actualCost: parseFloat(document.getElementById('sgActualCost').value) || 0,
+            progress,
+            responsible: document.getElementById('sgResponsible').value.trim()
         };
         if (existing) Store.updateStage(existing.id, payload);
         else Store.addStage({ projectId: pid, ...payload });
@@ -2540,6 +2827,148 @@ function openStageForm(params) {
         openProjectDetail(pid);
         renderAll();
         return true;
+    });
+}
+
+function addObjectForm() {
+    const name = document.getElementById('objectName').value.trim();
+    if (!name) { UI.toast('Введите название объекта', 'error'); return; }
+    Store.addObject({
+        name,
+        address: document.getElementById('objectAddress').value.trim(),
+        client: document.getElementById('objectClient').value.trim(),
+        contact: document.getElementById('objectContact').value.trim(),
+        type: document.getElementById('objectType').value,
+        area: parseFloat(document.getElementById('objectArea').value) || 0,
+        floors: parseInt(document.getElementById('objectFloors').value) || 0,
+        description: document.getElementById('objectDesc').value.trim()
+    });
+    document.getElementById('objectName').value = '';
+    document.getElementById('objectAddress').value = '';
+    document.getElementById('objectClient').value = '';
+    document.getElementById('objectContact').value = '';
+    document.getElementById('objectArea').value = '';
+    document.getElementById('objectFloors').value = '';
+    document.getElementById('objectDesc').value = '';
+    renderAll();
+    UI.toast('Объект создан');
+}
+
+function openEditObject(id) {
+    const o = Store.getObject(id);
+    if (!o) return;
+    const typeOpts = CONFIG.OBJECT_TYPES.map(t => {
+        const labels = { residential: 'Жилой', commercial: 'Коммерческий', industrial: 'Промышленный', infrastructure: 'Инфраструктура', renovation: 'Реновация', other: 'Другой' };
+        return `<option ${o.type === t ? 'selected' : ''} value="${t}">${labels[t] || t}</option>`;
+    }).join('');
+    UI.openModal('Редактировать объект',
+        `<div class="group-field"><label>Название *</label><input id="oName" value="${Utils.escapeHtml(o.name)}"></div>
+         <div class="group-field"><label>Тип</label><select id="oType">${typeOpts}</select></div>
+         <div class="group-field"><label>Адрес</label><input id="oAddress" value="${Utils.escapeHtml(o.address || '')}"></div>
+         <div class="group-field"><label>Заказчик</label><input id="oClient" value="${Utils.escapeHtml(o.client || '')}"></div>
+         <div class="group-field"><label>Контакт</label><input id="oContact" value="${Utils.escapeHtml(o.contact || '')}"></div>
+         <div class="group-field"><label>Площадь (м²)</label><input id="oArea" type="number" min="0" step="0.1" value="${o.area || 0}"></div>
+         <div class="group-field"><label>Этажей</label><input id="oFloors" type="number" min="0" step="1" value="${o.floors || 0}"></div>
+         <div class="group-field"><label>Описание</label><textarea id="oDesc" rows="2">${Utils.escapeHtml(o.description || '')}</textarea></div>`,
+        modalActionsHTML());
+    wireModal(() => {
+        const name = document.getElementById('oName').value.trim();
+        if (!name) { UI.toast('Введите название объекта', 'error'); return false; }
+        Store.updateObject(id, {
+            name,
+            type: document.getElementById('oType').value,
+            address: document.getElementById('oAddress').value.trim(),
+            client: document.getElementById('oClient').value.trim(),
+            contact: document.getElementById('oContact').value.trim(),
+            area: parseFloat(document.getElementById('oArea').value) || 0,
+            floors: parseInt(document.getElementById('oFloors').value) || 0,
+            description: document.getElementById('oDesc').value.trim()
+        });
+        UI.toast('Объект обновлён');
+        renderAll();
+        return true;
+    });
+}
+
+function openObjectDetail(id) {
+    const o = Store.getObject(id);
+    if (!o) return;
+    const cur = Store.settings().currency;
+    const projs = Store.projectsOfObject(o.id);
+    const totalBudget = projs.reduce((s, p) => s + Utils.cents(p.budget), 0);
+    const totalSpent = projs.reduce((s, p) => s + Calc.projectStats(p.id).spent, 0);
+    const typeLabels = { residential: 'Жилой', commercial: 'Коммерческий', industrial: 'Промышленный', infrastructure: 'Инфраструктура', renovation: 'Реновация', other: 'Другой' };
+    const projRows = projs.map(p => {
+        const st = Calc.projectStats(p.id);
+        return `<tr><td><b>${Utils.escapeHtml(p.name)}</b></td><td>${p.active ? p.status : 'Архив'}</td><td>${Utils.formatMoneyCents(Utils.cents(p.budget), cur)}</td><td>${Utils.formatMoneyCents(st.spent, cur)}</td><td><button class="sm info" data-detail-project="${Utils.escapeHtml(p.id)}">👁</button></td></tr>`;
+    }).join('');
+    UI.openModal('Объект: ' + o.name,
+        `<div class="detail-grid">
+            <div class="dl"><span>Тип</span><b>${typeLabels[o.type] || o.type}</b></div>
+            <div class="dl"><span>Адрес</span><b>${Utils.escapeHtml(o.address || '—')}</b></div>
+            <div class="dl"><span>Заказчик</span><b>${Utils.escapeHtml(o.client || '—')}</b></div>
+            <div class="dl"><span>Контакт</span><b>${Utils.escapeHtml(o.contact || '—')}</b></div>
+            <div class="dl"><span>Площадь</span><b>${o.area > 0 ? o.area + ' м²' : '—'}</b></div>
+            <div class="dl"><span>Этажей</span><b>${o.floors > 0 ? o.floors : '—'}</b></div>
+            <div class="dl"><span>Проектов</span><b>${projs.length}</b></div>
+            <div class="dl"><span>Бюджет (итого)</span><b>${Utils.formatMoneyCents(totalBudget, cur)}</b></div>
+            <div class="dl"><span>Потрачено (итого)</span><b>${Utils.formatMoneyCents(totalSpent, cur)}</b></div>
+        </div>
+        ${o.description ? `<p style="margin-top:12px;color:var(--secondary);font-size:13px">${Utils.escapeHtml(o.description)}</p>` : ''}
+        ${projs.length ? `<h3 style="margin-top:18px">Проекты объекта</h3><div class="table-wrapper"><table><thead><tr><th>Проект</th><th>Статус</th><th>Бюджет</th><th>Потрачено</th><th></th></tr></thead><tbody>${projRows}</tbody></table></div>` : '<p style="color:var(--secondary);font-size:13px;margin-top:12px">Проектов пока нет.</p>'}`,
+        `<button class="secondary" data-modal-close>Закрыть</button>`);
+}
+
+function openWorkForm(params) {
+    const existing = params && params.id ? Store.getWork(params.id) : null;
+    const stageId = existing ? existing.stageId : params.stageId;
+    const projectId = existing ? existing.projectId : params.projectId;
+    const stage = Store.data.stages.find(s => Utils.eq(s.id, stageId));
+    if (!stage) { UI.toast('Этап не найден', 'error'); return; }
+    const statusOpts = CONFIG.WORK_STATUSES.map(s => `<option ${existing && existing.status === s ? 'selected' : ''} value="${s}">${s}</option>`).join('');
+    UI.openModal(existing ? 'Редактировать работу' : 'Добавить работу',
+        `<div class="group-field"><label>Название *</label><input id="wkName" value="${existing ? Utils.escapeHtml(existing.name) : ''}"></div>
+         <div class="group-field"><label>Описание</label><input id="wkDesc" value="${existing ? Utils.escapeHtml(existing.description || '') : ''}"></div>
+         <div class="group-field"><label>Единица измерения</label><input id="wkUnit" value="${Utils.escapeHtml(existing ? (existing.unit || '') : '')}" placeholder="м², шт, м³..."></div>
+         <div class="group-field"><label>Плановое количество</label><input id="wkPlanQty" type="number" min="0" step="0.01" value="${existing ? (existing.plannedQuantity || 0) : 0}"></div>
+         <div class="group-field"><label>Фактическое количество</label><input id="wkFactQty" type="number" min="0" step="0.01" value="${existing ? (existing.completedQuantity || 0) : 0}"></div>
+         <div class="group-field"><label>Плановая стоимость (руб)</label><input id="wkPlanCost" type="number" min="0" step="0.01" value="${existing ? (existing.plannedCost || 0) : 0}"></div>
+         <div class="group-field"><label>Фактическая стоимость (руб)</label><input id="wkFactCost" type="number" min="0" step="0.01" value="${existing ? (existing.actualCost || 0) : 0}"></div>
+         <div class="group-field"><label>Статус</label><select id="wkStatus">${statusOpts}</select></div>
+         <div class="group-field"><label>Ответственный</label><input id="wkResponsible" value="${Utils.escapeHtml(existing ? (existing.responsible || '') : '')}"></div>`,
+        modalActionsHTML());
+    wireModal(() => {
+        const name = document.getElementById('wkName').value.trim();
+        if (!name) { UI.toast('Введите название работы', 'error'); return false; }
+        const payload = {
+            projectId,
+            stageId,
+            name,
+            description: document.getElementById('wkDesc').value.trim(),
+            unit: document.getElementById('wkUnit').value.trim(),
+            plannedQuantity: parseFloat(document.getElementById('wkPlanQty').value) || 0,
+            completedQuantity: parseFloat(document.getElementById('wkFactQty').value) || 0,
+            plannedCost: parseFloat(document.getElementById('wkPlanCost').value) || 0,
+            actualCost: parseFloat(document.getElementById('wkFactCost').value) || 0,
+            status: document.getElementById('wkStatus').value,
+            responsible: document.getElementById('wkResponsible').value.trim()
+        };
+        if (existing) Store.updateWork(existing.id, payload);
+        else Store.addWork(payload);
+        UI.toast(existing ? 'Работа обновлена' : 'Работа добавлена');
+        openProjectDetail(projectId);
+        renderAll();
+        return true;
+    });
+}
+
+function confirmDeleteWork(id) {
+    const w = Store.getWork(id);
+    UI.confirm('Удалить работу?', `Работа «${w ? w.name : ''}» будет удалена без возможности восстановления.`, () => {
+        Store.deleteWork(id);
+        if (w && document.getElementById('modalOverlay').classList.contains('active')) openProjectDetail(w.projectId);
+        renderAll();
+        UI.toast('Работа удалена');
     });
 }
 
@@ -2558,8 +2987,8 @@ function openTaskForm(params) {
          <div class="group-field"><label>Этап</label><select id="tkStage">${stageOpts}</select></div>
          <div class="group-field"><label>Статус</label><select id="tkStatus">${statusOpts}</select></div>
          <div class="group-field"><label>Приоритет</label><select id="tkPriority">${priOpts}</select></div>
-         <div class="group-field"><label>Дедлайн</label><input id="tkDue" type="date" value="${Utils.escapeHtml(existing ? existing.dueDate || '' : '')}"></div>
-         <div class="group-field"><label>Описание</label><input id="tkDesc" value="${Utils.escapeHtml(existing ? existing.description || '' : '')}"></div>
+         <div class="group-field"><label>Дедлайн</label><input id="tkDue" type="date" value="${Utils.escapeHtml(existing ? (existing.dueDate || '') : '')}"></div>
+         <div class="group-field"><label>Описание</label><input id="tkDesc" value="${Utils.escapeHtml(existing ? (existing.description || '') : '')}"></div>
          ${workerOpts ? `<div class="group-field"><label>Исполнители</label>${workerOpts}</div>` : '<div class="group-field"><small>Нет работников. Сначала добавьте работников.</small></div>'}`,
         modalActionsHTML());
     wireModal(() => {
@@ -3184,6 +3613,8 @@ function setupEvents() {
             '[data-archive-worker],[data-restore-worker],[data-del-expense],[data-del-time],[data-del-template],' +
             '[data-dup-expense],[data-apply-template],[data-cal-date],' +
             '[data-stage-add],[data-stage-edit],[data-stage-move],[data-stage-status],' +
+            '[data-edit-object],[data-detail-object],[data-archive-object],[data-restore-object],' +
+            '[data-work-add],[data-work-edit],[data-work-del],' +
             '[data-task-add],[data-task-edit],[data-task-del],[data-task-status],' +
             '[data-pay-worker]');
         if (scoped) {
@@ -3234,6 +3665,7 @@ const ACTIONS = {
     'quick-stats': () => UI.tab('dashboard'),
     'toggle-theme': toggleTheme,
     'add-project': addProjectForm,
+    'add-object': addObjectForm,
     'add-worker': addWorkerForm,
     'add-expense': addExpense,
     'add-time': addTimeEntry,
@@ -3285,6 +3717,16 @@ function handleScoped(el) {
     }
     else if (d.stageMove) { Store.moveStage(d.stageMove, Number(d.dir) || 0); reopenProjectDetailForStage(d.stageMove); }
     else if (d.stageStatus) { Store.setStageStatus(d.stageStatus, d.st); reopenProjectDetailForStage(d.stageStatus); }
+    else if (d.editObject) openEditObject(d.editObject);
+    else if (d.detailObject) openObjectDetail(d.detailObject);
+    else if (d.archiveObject) { Store.archiveObject(d.archiveObject); renderAll(); UI.toast('Объект в архиве'); }
+    else if (d.restoreObject) { Store.restoreObject(d.restoreObject); renderAll(); UI.toast('Объект восстановлен'); }
+    else if (d.workAdd) openWorkForm({ stageId: d.workAdd, projectId: d.pid || '' });
+    else if (d.workEdit) {
+        const w = Store.getWork(d.workEdit);
+        if (w) openWorkForm({ id: d.workEdit, stageId: w.stageId, projectId: w.projectId });
+    }
+    else if (d.workDel) confirmDeleteWork(d.workDel);
     else if (d.taskAdd) openTaskForm({ projectId: d.taskAdd });
     else if (d.taskEdit) {
         const tk = Store.data.tasks.find(x => Utils.eq(x.id, d.taskEdit));
@@ -3408,6 +3850,7 @@ async function initApp() {
     updateReportFilters();
     updateFinanceFilters();
     updateAnalyticsFilters();
+    Render.objects();
     const pc = document.getElementById('projectCurrency');
     if (pc) pc.value = Store.settings().currency;
     setupEvents();

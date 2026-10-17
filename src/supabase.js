@@ -7,13 +7,15 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 // Map between camelCase JS field names and snake_case DB column names.
 const TABLE_MAP = {
-    projects: { table: 'projects', fields: { id: 'id', name: 'name', budget: 'budget', currency: 'currency', status: 'status', desc: 'desc', startDate: 'start_date', endDate: 'end_date', priority: 'priority', lead: 'lead', active: 'active', createdAt: 'created_at', updatedAt: 'updated_at' } },
+    objects: { table: 'objects', fields: { id: 'id', name: 'name', address: 'address', client: 'client', contact: 'contact', description: 'description', area: 'area', floors: 'floors', type: 'type', active: 'active', createdAt: 'created_at', updatedAt: 'updated_at' } },
+    projects: { table: 'projects', fields: { id: 'id', objectId: 'object_id', name: 'name', budget: 'budget', currency: 'currency', status: 'status', desc: 'desc', startDate: 'start_date', endDate: 'end_date', priority: 'priority', lead: 'lead', active: 'active', createdAt: 'created_at', updatedAt: 'updated_at' } },
     workers: { table: 'workers', fields: { id: 'id', name: 'name', phone: 'phone', position: 'position', rate: 'rate', schedule: 'schedule', active: 'active', createdAt: 'created_at', updatedAt: 'updated_at' } },
     expenses: { table: 'expenses', fields: { id: 'id', projectId: 'project_id', category: 'category', amount: 'amount', date: 'date', desc: 'desc', workers: 'workers', splits: 'splits', createdAt: 'created_at', updatedAt: 'updated_at' } },
     timeEntries: { table: 'time_entries', fields: { id: 'id', workerId: 'worker_id', projectId: 'project_id', date: 'date', hours: 'hours', type: 'type', comment: 'comment', rateSnapshot: 'rate_snapshot', createdAt: 'created_at', updatedAt: 'updated_at' } },
     templates: { table: 'templates', fields: { id: 'id', name: 'name', category: 'category', amount: 'amount', projectId: 'project_id', desc: 'desc', createdAt: 'created_at', updatedAt: 'updated_at' } },
-    stages: { table: 'stages', fields: { id: 'id', projectId: 'project_id', name: 'name', description: 'description', status: 'status', startDate: 'start_date', endDate: 'end_date', order: 'order', createdAt: 'created_at', updatedAt: 'updated_at' } },
+    stages: { table: 'stages', fields: { id: 'id', projectId: 'project_id', name: 'name', description: 'description', status: 'status', startDate: 'start_date', endDate: 'end_date', plannedStart: 'planned_start', plannedEnd: 'planned_end', actualStart: 'actual_start', actualEnd: 'actual_end', progress: 'progress', budget: 'budget', actualCost: 'actual_cost', responsible: 'responsible', order: 'order', createdAt: 'created_at', updatedAt: 'updated_at' } },
     tasks: { table: 'tasks', fields: { id: 'id', projectId: 'project_id', stageId: 'stage_id', title: 'title', description: 'description', status: 'status', priority: 'priority', workerIds: 'worker_ids', startDate: 'start_date', dueDate: 'due_date', completedAt: 'completed_at', createdAt: 'created_at', updatedAt: 'updated_at' } },
+    works: { table: 'works', fields: { id: 'id', projectId: 'project_id', stageId: 'stage_id', name: 'name', description: 'description', unit: 'unit', plannedQuantity: 'planned_quantity', completedQuantity: 'completed_quantity', plannedCost: 'planned_cost', actualCost: 'actual_cost', status: 'status', responsible: 'responsible', sortOrder: 'sort_order', active: 'active', createdAt: 'created_at', updatedAt: 'updated_at' } },
     activityLog: { table: 'activity_log', fields: { id: 'id', ts: 'ts', entity: 'entity', action: 'action', label: 'label' } }
 };
 
@@ -40,13 +42,16 @@ function fromDbRow(collection, row) {
 // Load all data from Supabase, reconstruct the Store.data shape.
 export async function loadFromSupabase() {
     const data = {
+        objects: [],
         projects: [], workers: [], expenses: [],
         timeEntries: [], templates: [],
-        stages: [], tasks: [], activityLog: [],
+        stages: [], tasks: [], works: [],
+        activityLog: [],
         settings: null
     };
 
-    const [projects, workers, expenses, timeEntries, templates, stages, tasks, activityLog, settingsRow] = await Promise.all([
+    const [objects, projects, workers, expenses, timeEntries, templates, stages, tasks, works, activityLog, settingsRow] = await Promise.all([
+        supabase.from('objects').select('*').order('created_at'),
         supabase.from('projects').select('*').order('created_at'),
         supabase.from('workers').select('*').order('created_at'),
         supabase.from('expenses').select('*').order('date'),
@@ -54,11 +59,12 @@ export async function loadFromSupabase() {
         supabase.from('templates').select('*').order('created_at'),
         supabase.from('stages').select('*').order('order'),
         supabase.from('tasks').select('*').order('created_at'),
+        supabase.from('works').select('*').order('sort_order'),
         supabase.from('activity_log').select('*').order('ts'),
         supabase.from('app_settings').select('*').eq('id', 1).maybeSingle()
     ]);
 
-    const results = { projects, workers, expenses, timeEntries, templates, stages, tasks, activityLog };
+    const results = { objects, projects, workers, expenses, timeEntries, templates, stages, tasks, works };
     for (const [coll, res] of Object.entries(results)) {
         if (res.error) throw new Error(`load ${coll}: ${res.error.message}`);
         data[coll] = res.data.map(row => fromDbRow(coll, row));
@@ -76,7 +82,7 @@ export async function loadFromSupabase() {
 // Full sync: upsert all rows from Store.data to Supabase.
 // Called debounced by Storage.write().
 export async function syncToSupabase(data) {
-    const collections = ['projects', 'workers', 'expenses', 'timeEntries', 'templates', 'stages', 'tasks', 'activityLog'];
+    const collections = ['objects', 'projects', 'workers', 'expenses', 'timeEntries', 'templates', 'stages', 'tasks', 'works', 'activityLog'];
 
     for (const coll of collections) {
         const { table } = TABLE_MAP[coll];
