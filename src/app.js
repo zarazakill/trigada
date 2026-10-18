@@ -1546,6 +1546,10 @@ const Render = {
         const totalBudget = Store.data.projects.reduce((s, p) => s + Utils.cents(p.budget), 0);
         const budgetUsed = totalBudget > 0 ? totalSpent : 0;
         const budgetRemaining = totalBudget - budgetUsed;
+        const activeObjects = Store.data.objects.filter(o => o.active).length;
+        const activeStages = Store.data.stages.filter(s => s.status === 'active').length;
+        const totalWorks = Store.data.works.length;
+        const doneWorks = Store.data.works.filter(w => w.status === 'DONE').length;
 
         const debtLabel = totalDebtCents < 0
             ? 'Переплата: ' + Utils.formatMoneyCents(Math.abs(totalDebtCents), cur)
@@ -1561,7 +1565,10 @@ const Render = {
             `<div class="stat-card flat"><h4>Общая стоимость</h4><div class="value">${Utils.formatMoneyCents(totalCost, cur)}</div></div>` +
             `<div class="stat-card flat"><h4>Выплачено</h4><div class="value">${Utils.formatMoneyCents(totalPaid, cur)}</div></div>` +
             `<div class="stat-card flat"><h4>Бюджет (план)</h4><div class="value">${Utils.formatMoneyCents(totalBudget, cur)}</div></div>` +
-            `<div class="stat-card flat"><h4>Остаток бюджета</h4><div class="value">${Utils.formatMoneyCents(budgetRemaining, cur)}</div></div>`;
+            `<div class="stat-card flat"><h4>Остаток бюджета</h4><div class="value">${Utils.formatMoneyCents(budgetRemaining, cur)}</div></div>` +
+            `<div class="stat-card secondary"><h4>Объектов</h4><div class="value">${activeObjects}</div></div>` +
+            `<div class="stat-card secondary"><h4>Активных этапов</h4><div class="value">${activeStages}</div></div>` +
+            `<div class="stat-card flat"><h4>Работ (выполнено)</h4><div class="value">${doneWorks} / ${totalWorks}</div></div>`;
 
         // Smart Summary
         if (CONFIG.features.smartSummary) this._smartSummary();
